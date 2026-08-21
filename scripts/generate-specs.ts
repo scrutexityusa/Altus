@@ -664,6 +664,8 @@ function buildOpenApi(): unknown {
         get: {
           tags: ['Authority'],
           summary: 'Read a lease and its full ancestry',
+          description:
+            'Returns `status` (the stored disposition) alongside `effective_status` (what an authorization decision would conclude right now, on the database clock). They differ for a lease that has simply run out of time: nothing rewrites rows when a clock passes them, so `status` still reads ACTIVE while `effective_status` reads EXPIRED. Read the second one to know whether the authority is usable.',
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             '200': jsonResponse('Lease and ancestry.', { type: 'object' }),

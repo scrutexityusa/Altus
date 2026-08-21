@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ScrutexityError, newId } from '@scrutexity/core';
+import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
 import type { Database, PoolClient } from './db/pool.js';
+import { securityNow } from './db/security-clock.js';
 
 /**
  * Bearer credentials for machine and human principals.
@@ -48,20 +49,26 @@ export async function authenticate(db: Database, header: string | undefined): Pr
   if (!match) throw UNAUTHORIZED();
 
   const [, prefix] = match;
-  const row = await db.withoutTenant(async (client: PoolClient) => {
+  // The credential row and the instant it is judged against are read on the
+  // same connection, in the same transaction, so an API node's clock cannot
+  // keep an expired credential alive or kill a live one.
+  const { row, now } = await db.withoutTenant(async (client: PoolClient) => {
     const result = await client.query('SELECT * FROM scrutexity.resolve_credential($1)', [prefix]);
-    return result.rows[0] as
-      | {
-          id: string;
-          organization_id: string;
-          principal_type: Principal['type'];
-          principal_id: string;
-          token_hash: Buffer;
-          scopes: string[];
-          status: 'ACTIVE' | 'REVOKED';
-          expires_at: Date | null;
-        }
-      | undefined;
+    return {
+      now: await securityNow(client),
+      row: result.rows[0] as
+        | {
+            id: string;
+            organization_id: string;
+            principal_type: Principal['type'];
+            principal_id: string;
+            token_hash: Buffer;
+            scopes: string[];
+            status: 'ACTIVE' | 'REVOKED';
+            expires_at: Date | null;
+          }
+        | undefined,
+    };
   });
 
   // Hash the supplied token regardless of whether a row was found, so a
@@ -72,7 +79,7 @@ export async function authenticate(db: Database, header: string | undefined): Pr
 
   if (!row || !matches) throw UNAUTHORIZED();
   if (row.status !== 'ACTIVE') throw UNAUTHORIZED();
-  if (row.expires_at && row.expires_at.getTime() <= Date.now()) throw UNAUTHORIZED();
+  if (row.expires_at && isExpired(row.expires_at, now)) throw UNAUTHORIZED();
 
   return {
     credential_id: row.id,

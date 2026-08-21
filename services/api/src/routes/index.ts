@@ -1,6 +1,7 @@
 import {
   ScrutexityError,
   explainDecision,
+  effectiveLeaseStatus,
   grantState,
   hashObject,
   loadPolicyDocument,
@@ -12,6 +13,7 @@ import type { FastifyInstance } from 'fastify';
 import { SCOPES, requireHuman, requireNonAgent, requireScope, type Principal } from '../auth.js';
 import { claimIdempotencyKey, completeIdempotencyKey } from '../idempotency.js';
 import type { Database, PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import type { EvidenceKeys } from '../services/evidence.js';
 import { fetchReceipt, verifyReceiptWithChain } from '../services/evidence.js';
@@ -316,7 +318,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       );
       if (result.rowCount === 0)
         throw new ScrutexityError('NOT_FOUND', 'authority lease not found');
-      const now = new Date();
+      // The same clock an authorization would use. A lease reported ACTIVE
+      // here and refused as EXPIRED a moment later by a decision would make
+      // this endpoint a liar about the thing it exists to describe.
+      const now = await securityNow(client);
       const rows = (result.rows as LeaseRow[]).map(toLease);
       const lease = rows.find((l) => l.id === request.params.id)!;
       assertMayReadSubject(request.principal, lease.agent_id);
@@ -337,6 +342,18 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       return {
         authority_lease: {
           ...lease,
+          /**
+           * What a decision would conclude about this lease right now, on the
+           * authoritative clock.
+           *
+           * `status` is the stored column -- the disposition someone wrote.
+           * It says ACTIVE for a lease that has simply run out of time,
+           * because nothing goes back to rewrite rows when a clock passes
+           * them. Reporting only that would have this endpoint call a lease
+           * ACTIVE while an authorization refuses it as EXPIRED, which is a
+           * lie about the one thing it exists to describe.
+           */
+          effective_status: effectiveLeaseStatus(lease, now),
           grant_state: grantState(lease, now),
           execution_outcome: execution.rows[0]
             ? {
@@ -346,7 +363,11 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
               }
             : null,
         },
-        ancestry: rows.map((l) => ({ ...l, grant_state: grantState(l, now) })),
+        ancestry: rows.map((l) => ({
+          ...l,
+          effective_status: effectiveLeaseStatus(l, now),
+          grant_state: grantState(l, now),
+        })),
       };
     });
   });

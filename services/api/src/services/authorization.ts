@@ -29,6 +29,7 @@ import {
   type SignalView,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type AgentRow, type LeaseRow, type SignalRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
@@ -90,7 +91,11 @@ export async function authorize(
   input: AuthorizeInput,
 ): Promise<AuthorizeResult> {
   const started = performance.now();
-  const now = new Date();
+  // The authoritative instant for this whole decision. Every expiry judged
+  // below -- lease, ancestry, signal, approval, grant -- reads this one value,
+  // so the facts a decision rests on all held simultaneously. See
+  // db/security-clock.ts.
+  const now = await securityNow(client);
 
   // -- Agent ----------------------------------------------------------------
   const agentRow = await loadAgent(client, input.agentHandleOrId);
@@ -262,7 +267,7 @@ export async function reevaluateWithApprovals(
   approvalRequestId: string,
 ): Promise<AuthorizeResult | null> {
   const started = performance.now();
-  const now = new Date();
+  const now = await securityNow(client);
 
   const apr = await client.query(
     `SELECT ar.*, d.id AS decision_id

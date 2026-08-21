@@ -9,6 +9,7 @@ import type { PoolClient } from '../db/pool.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
 import { currentContextHash } from './context.js';
+import { securityNow } from '../db/security-clock.js';
 
 /**
  * Recording an execution against a decision.
@@ -54,7 +55,8 @@ export async function recordExecution(
       },
     );
   }
-  if (decision.expires_at && isExpired(decision.expires_at, new Date())) {
+  const now = await securityNow(client);
+  if (decision.expires_at && isExpired(decision.expires_at, now)) {
     throw new ScrutexityError(
       'AUTHORITY_EXPIRED',
       'the execution grant conferred by this decision has expired; re-evaluate',

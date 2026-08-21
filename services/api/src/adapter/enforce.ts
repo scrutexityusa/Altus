@@ -13,6 +13,7 @@ import {
   type ExecutionGrantBinding,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './../services/evidence.js';
@@ -119,7 +120,10 @@ export async function enforceExecution(
   providers: ProviderRegistry,
   input: EnforceExecutionInput,
 ): Promise<EnforceExecutionResult> {
-  const now = new Date();
+  // Authoritative for every expiry judged in this boundary: the grant, the
+  // acting lease and every ancestor. An API node with a fast clock must not be
+  // able to refuse a live grant, nor a slow one honour a lapsed lease.
+  const now = await securityNow(client);
 
   // -- 1. The grant exists, and belongs to this agent -----------------------
   const decision = await loadDecision(client, input.decisionId);

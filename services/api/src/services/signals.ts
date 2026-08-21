@@ -7,6 +7,7 @@ import {
   type SignalSigningKey,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
 import { recordSecurityEvent, type SecurityEventInput } from './security-events.js';
@@ -74,7 +75,10 @@ export async function ingestSignal(
     );
   }
 
-  const now = new Date();
+  // A signal's issued_at window, its TTL and its signing key's validity window
+  // are all judged against the authoritative clock. A source with a fast clock
+  // must not be able to widen its own replay window.
+  const now = await securityNow(client);
   const issuedAt = input.issuedAt ? new Date(input.issuedAt) : now;
   if (Number.isNaN(issuedAt.getTime())) {
     throw new ScrutexityError('INVALID_REQUEST', 'issued_at is not a valid timestamp');

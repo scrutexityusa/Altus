@@ -10,6 +10,7 @@ import {
   type AuthorityGrant,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
@@ -111,7 +112,10 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
     });
   }
 
-  const now = new Date();
+  // Authoritative: the lease's issued_at and expires_at are derived from this,
+  // so the row's own lifetime is measured on the same clock that will later
+  // judge it.
+  const now = await securityNow(client);
   const leaseId = newId('lease');
 
   const inserted = await client.query(
@@ -287,7 +291,14 @@ export async function createDelegation(
       requested_grant: requestedGrant,
       requested_ttl_seconds: input.ttlSeconds,
     },
-    { now: new Date(), parent_lease: parentLease, parent_chain: chain, policy: document },
+    {
+      // Delegation containment is a validity decision like any other: the
+      // parent chain must be live *now*, on the authoritative clock.
+      now: await securityNow(client),
+      parent_lease: parentLease,
+      parent_chain: chain,
+      policy: document,
+    },
   );
 
   if (!decision.ok) {

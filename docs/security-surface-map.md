@@ -9,6 +9,25 @@ authority, what it persists, how it fails, and which test proves the claim. A
 control with no test is listed as a gap, not as a control.
 
 **Status at audit time:** 428 tests, 14 files, clean CI.
+**Current:** 494 tests, 17 files.
+
+## How to read a gap's status
+
+"Closed" is one word covering five different claims, and collapsing them is how
+a system arrives at a design partner with more confidence than evidence. Each
+gap carries all five:
+
+| Stage                      | Means                                                                                                    |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Discovered**             | Someone noticed it. Nothing more.                                                                        |
+| **Validated**              | Reproduced — the failure was demonstrated, not inferred from reading.                                    |
+| **Fixed**                  | An implementation exists and the intended behaviour was observed once.                                   |
+| **Regression-tested**      | An adversarial test fails if the fix is removed. This is the bar that survives a refactor.               |
+| **Operationally verified** | Confirmed in a real deployment, against real infrastructure. Nothing in this repository can assert this. |
+
+The last one is the honest limit of what code and tests can prove. A gap can be
+**Regression-tested: PASS** and **Operationally verified: NOT YET** at the same
+time, and saying so is more useful to a design partner than a green tick.
 
 ---
 
@@ -177,22 +196,39 @@ mutable "latest" key. Decisions pin `policy_version_id` **and** `policy_hash`.
 
 ## Gaps, ranked
 
-| #        | Gap                                                                                                                       | Severity     | Section  |
-| -------- | ------------------------------------------------------------------------------------------------------------------------- | ------------ | -------- |
-| **G-2**  | `leases:write` can issue unbounded authority; no `IssuerAuthority`                                                        | **Critical** | 19       |
-| **G-4**  | No runtime invariant assertion before ALLOW                                                                               | **High**     | 11, 12   |
-| **G-14** | `SCOPES.read` defined and granted but **never enforced** — every GET open to any authenticated principal, agents included | **High**     | 32, 55   |
-| **G-12** | Expiry compared against API-node clock, not database time                                                                 | **High**     | 45       |
-| **G-5**  | HMAC signal secrets stored in plaintext                                                                                   | **High**     | 16, 27   |
-| **G-3**  | Delegation containment checked at creation only                                                                           | Medium       | 11       |
-| **G-7**  | Reconciliation can surface UNKNOWN but not resolve it                                                                     | Medium       | 7        |
-| **G-6**  | Signal source not bound to signal type                                                                                    | Medium       | 16       |
-| **G-15** | No rate limiting anywhere                                                                                                 | Medium       | 49       |
-| **G-11** | No external evidence anchor                                                                                               | Medium       | Threat D |
-| **G-1**  | Bearer token only; no workload-bound identity                                                                             | Medium       | 43       |
-| **G-8**  | No `HUMAN_REVIEW_REQUIRED` state                                                                                          | Low          | 7        |
-| **G-13** | No offline-verifiable evidence export                                                                                     | Low          | 52       |
-| **G-9**  | Unenforced self-report path still exists                                                                                  | Low          | —        |
+| #        | Gap                                                              | Severity | Validated | Fixed        | Regression-tested | Operationally verified  |
+| -------- | ---------------------------------------------------------------- | -------- | --------- | ------------ | ----------------- | ----------------------- |
+| G-2      | `leases:write` could issue unbounded authority                   | Critical | ✅        | ✅           | ✅ 9 tests        | —                       |
+| G-4      | No runtime invariant assertion before ALLOW                      | High     | ✅        | ✅           | ✅ 16 + 5 tests   | —                       |
+| G-14     | `read` scope never enforced; reads not subject-scoped            | High     | ✅        | ✅           | ✅ 15 tests       | —                       |
+| G-3      | Containment checked at creation only                             | Medium   | ✅        | ✅ (via G-4) | ✅                | —                       |
+| **G-12** | **Expiry judged on the API clock, rows written on the DB clock** | **High** | ✅        | ✅           | ✅ 20 tests       | **NOT YET — see below** |
+| G-5      | HMAC signal secrets stored in plaintext                          | High     | ✅        | —            | —                 | —                       |
+| G-7      | Reconciliation surfaces UNKNOWN but cannot resolve it            | Medium   | ✅        | —            | —                 | —                       |
+| G-6      | Signal source not bound to signal type                           | Medium   | ✅        | —            | —                 | —                       |
+| G-15     | No rate limiting anywhere                                        | Medium   | ✅        | —            | —                 | —                       |
+| G-11     | No external evidence anchor                                      | Medium   | ✅        | —            | —                 | —                       |
+| G-1      | Bearer token only; no workload-bound identity                    | Medium   | ✅        | —            | —                 | —                       |
+| G-8      | No `HUMAN_REVIEW_REQUIRED` state                                 | Low      | ✅        | —            | —                 | —                       |
+| G-13     | No offline-verifiable evidence export                            | Low      | ✅        | —            | —                 | —                       |
+| G-9      | Unenforced self-report path still exists                         | Low      | ✅        | n/a          | n/a               | —                       |
+
+### G-12, and what "operationally verified" would require
+
+The implementation makes the database the single authority for every validity
+decision, and twenty tests prove an API node skewed an hour in either direction
+cannot change any answer. That is as far as code can go.
+
+What is **not** established, and cannot be from here:
+
+- that the database host's clock is synchronised and not silently stepped by a
+  hypervisor or a VM migration;
+- that a future read replica has not reintroduced a second clock;
+- that `now()` on the production primary is what the deployment believes it is.
+
+Those are checks a design partner's infrastructure has to answer. Recording
+them as open is the difference between "we fixed it" and "we fixed the part we
+control".
 
 ### G-14, expanded — **closed**
 

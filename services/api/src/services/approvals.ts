@@ -1,5 +1,6 @@
-import { ScrutexityError, newId } from '@scrutexity/core';
+import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
 import { reevaluateWithApprovals } from './authorization.js';
@@ -42,7 +43,11 @@ export async function submitApproval(
       `this approval request is already ${approvalRequest.status}`,
     );
   }
-  if (approvalRequest.expires_at.getTime() <= Date.now()) {
+  // Database time, like every other expiry. An approval window is authority
+  // with a deadline, and the deadline must not depend on which replica the
+  // approver's request happened to reach.
+  const now = await securityNow(client);
+  if (isExpired(approvalRequest.expires_at, now)) {
     await client.query(
       `UPDATE scrutexity.approval_requests SET status = 'EXPIRED', resolved_at = now() WHERE id = $1`,
       [input.approvalRequestId],

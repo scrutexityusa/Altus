@@ -13,6 +13,7 @@ import {
   type ReceiptVerifier,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { metrics } from '../metrics.js';
 import type { Config } from '../config.js';
 
@@ -84,7 +85,12 @@ export async function appendReceipt(
     decision_id: input.decisionId ?? null,
     payload: input.payload,
     previous_hash: previousHash,
-    created_at: new Date().toISOString(),
+    // Authoritative, and deliberately the same instant the row's own
+    // created_at column will hold. This value is *hashed into the receipt*,
+    // so a verifier recomputing the hash from the payload and an auditor
+    // reading the column have to see one timestamp, not two that drifted
+    // apart by however far this node's clock happens to be off.
+    created_at: (await securityNow(client)).toISOString(),
     signer: keys.signer,
   });
 
