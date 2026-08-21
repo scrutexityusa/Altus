@@ -9,7 +9,7 @@ import {
   verifyReceipt,
 } from '@scrutexity/core';
 import type { FastifyInstance } from 'fastify';
-import { SCOPES, requireHuman, requireScope, type Principal } from '../auth.js';
+import { SCOPES, requireHuman, requireNonAgent, requireScope, type Principal } from '../auth.js';
 import { claimIdempotencyKey, completeIdempotencyKey } from '../idempotency.js';
 import type { Database, PoolClient } from '../db/pool.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
@@ -61,6 +61,56 @@ declare module 'fastify' {
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const { db, keys, providers } = deps;
+
+  /**
+   * Ordinary reads: an agent's own decisions, leases, traces and receipts.
+   *
+   * Every GET goes through one of these two. Before this existed the `read`
+   * scope was granted by the seed and checked by nothing, which meant an agent
+   * credential could fetch the policy document that governs it and the
+   * security-event log recording its own attacks. Scopes that are never
+   * enforced are worse than absent -- they read as a control in every review.
+   */
+  function requireRead(principal: Principal): void {
+    requireScope(principal, SCOPES.read);
+  }
+
+  /**
+   * Operator reads: the policy documents, the security event log, signing key
+   * metadata, the agent register, unresolved executions.
+   *
+   * Two independent gates, because either alone would be too weak. The scope
+   * keeps out credentials that were never meant to audit; `requireNonAgent`
+   * keeps out an agent that was mistakenly granted the scope. The principal
+   * whose behaviour this control plane exists to constrain must not be able to
+   * read the constraints.
+   */
+  function requireOperatorRead(principal: Principal): void {
+    requireScope(principal, SCOPES.audit);
+    requireNonAgent(principal);
+  }
+
+  /**
+   * An agent may read only the records it is the subject of.
+   *
+   * Tenancy alone is not enough here. Two agents in one tenant are two
+   * principals with different authority, and an id that appears in a URL is
+   * guessable, enumerable and frequently logged -- so without this, holding a
+   * decision id is the same as being the agent it was issued to.
+   *
+   * NOT_FOUND rather than FORBIDDEN, deliberately. A 403 confirms the record
+   * exists, which turns the endpoint into an oracle an attacker can sweep to
+   * map another agent's activity. A prober learns nothing either way.
+   *
+   * Humans and services are not narrowed: an operator investigating an
+   * incident needs to read across agents, and that is what the audit scope and
+   * the security event log are for.
+   */
+  function assertMayReadSubject(principal: Principal, subjectAgentId: string | null): void {
+    if (principal.type !== 'agent') return;
+    if (subjectAgentId !== null && subjectAgentId === principal.id) return;
+    throw new ScrutexityError('NOT_FOUND', 'not found');
+  }
 
   /**
    * Runs a handler in a tenant-scoped transaction, honouring an
@@ -162,17 +212,19 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     reply.code(status).send(payload);
   });
 
-  app.get('/v1/agents', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/agents', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         'SELECT * FROM scrutexity.agents ORDER BY created_at DESC LIMIT 200',
       );
       return { agents: result.rows.map(serializeAgent) };
-    }),
-  );
+    });
+  });
 
-  app.get<{ Params: { id: string } }>('/v1/agents/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const agent = await client.query(
         'SELECT * FROM scrutexity.agents WHERE id = $1 OR handle = $1',
         [request.params.id],
@@ -216,8 +268,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         risk_signals: signals.rows.map(serializeSignal),
         recent_decisions: decisions.rows,
       };
-    }),
-  );
+    });
+  });
 
   // ==========================================================================
   // Authority
@@ -250,8 +302,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     reply.code(status).send(payload);
   });
 
-  app.get<{ Params: { id: string } }>('/v1/authority-leases/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/authority-leases/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `WITH RECURSIVE chain AS (
            SELECT * FROM scrutexity.authority_leases WHERE id = $1
@@ -265,6 +318,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       const now = new Date();
       const rows = (result.rows as LeaseRow[]).map(toLease);
       const lease = rows.find((l) => l.id === request.params.id)!;
+      assertMayReadSubject(request.principal, lease.agent_id);
 
       // Whether a claimed grant was ever acted on is not derivable from the
       // lease row alone: a claim with no execution behind it means the agent
@@ -293,8 +347,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         },
         ancestry: rows.map((l) => ({ ...l, grant_state: grantState(l, now) })),
       };
-    }),
-  );
+    });
+  });
 
   app.post<{ Params: { id: string } }>('/v1/authority-leases/:id/revoke', async (request) => {
     requireScope(request.principal, SCOPES.leaseWrite);
@@ -444,8 +498,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
    * human-readable rendering below it is assembled deterministically from the
    * same structured facts, never generated.
    */
-  app.get<{ Params: { id: string } }>('/v1/authorization-decisions/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/authorization-decisions/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT d.*, r.action, r.resource_type, r.resource_id, r.context, r.created_at AS requested_at,
                 a.handle AS agent_handle
@@ -458,6 +513,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       if (result.rowCount === 0)
         throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
       const row = result.rows[0];
+      assertMayReadSubject(request.principal, row.agent_id as string);
 
       // When the acting authority was delegated, name the agent that granted
       // it. The explanation is materially different -- "that authority was
@@ -541,8 +597,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
             : {}),
         }),
       };
-    }),
-  );
+    });
+  });
 
   /**
    * The enforcement boundary.
@@ -596,7 +652,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.get<{ Querystring: { older_than_seconds?: string } }>(
     '/v1/executions/unresolved',
     async (request) => {
-      requireScope(request.principal, SCOPES.authorize);
+      requireOperatorRead(request.principal);
       const olderThan = Math.min(
         86_400,
         Math.max(0, Number(request.query.older_than_seconds ?? 0) || 0),
@@ -708,8 +764,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   // Approvals
   // ==========================================================================
 
-  app.get('/v1/approval-requests', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/approval-requests', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT ar.*, d.decision, d.reason_code, d.agent_id, r.action, r.resource_type,
                 r.resource_id, r.context, a.handle AS agent_handle
@@ -721,8 +778,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ORDER BY ar.created_at DESC LIMIT 100`,
       );
       return { approval_requests: result.rows };
-    }),
-  );
+    });
+  });
 
   app.post('/v1/approvals', async (request, reply) => {
     requireScope(request.principal, SCOPES.approve);
@@ -768,13 +825,17 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   // Evidence
   // ==========================================================================
 
-  app.get<{ Params: { id: string } }>('/v1/receipts/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/receipts/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const receipt = await fetchReceipt(client, request.params.id);
       if (!receipt) throw new ScrutexityError('NOT_FOUND', 'receipt not found');
+      // A receipt's subject is the agent it is about. An agent may hold its own
+      // evidence; it may not read the chain entry for another agent's wire.
+      assertMayReadSubject(request.principal, receipt.subject_id);
       return { receipt };
-    }),
-  );
+    });
+  });
 
   app.post<{ Params: { id: string } }>('/v1/receipts/:id/verify', async (request) =>
     db.withTenant(request.principal.organization_id, async (client) => {
@@ -1018,16 +1079,20 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     });
   });
 
-  app.get('/v1/policy-versions', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/policy-versions', async (request) => {
+    // The policy document itself. An agent that can read this has every
+    // threshold, approver role and decay rule that governs it -- which defeats
+    // the leak controls the refusal paths take seriously.
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT pv.*, p.key AS policy_key FROM scrutexity.policy_versions pv
            JOIN scrutexity.policies p ON p.id = pv.policy_id
           ORDER BY pv.created_at DESC LIMIT 100`,
       );
       return { policy_versions: result.rows.map(serializePolicyVersion) };
-    }),
-  );
+    });
+  });
 
   // ==========================================================================
   // Causal evidence
@@ -1038,15 +1103,29 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
    * in causal order, oldest cause first. A database traversal -- nothing is
    * summarised or generated, so the same decision always yields the same trace.
    */
-  app.get<{ Params: { id: string } }>('/v1/trace/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/trace/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      // Checked before the trace is built, not after. The trace walks policy
+      // activations, signal ingestion and the whole authority ancestry -- it is
+      // the richest read in the API, and an agent must not be able to obtain
+      // one for a decision that was not issued to it.
+      const subject = await client.query(
+        'SELECT agent_id FROM scrutexity.authorization_decisions WHERE id = $1',
+        [request.params.id],
+      );
+      assertMayReadSubject(
+        request.principal,
+        (subject.rows[0]?.agent_id as string | undefined) ?? null,
+      );
+
       const started = performance.now();
       const trace = await buildDecisionTrace(client, request.params.id);
       metrics.traceDuration.observe((performance.now() - started) / 1000);
       metrics.traceNodes.observe(trace.trace.length);
       return trace;
-    }),
-  );
+    });
+  });
 
   // ==========================================================================
   // Signal signing keys
@@ -1095,8 +1174,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     reply.code(status).send(payload);
   });
 
-  app.get('/v1/signal-keys', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/signal-keys', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT id, source, key_id, algorithm, status, not_before, not_after,
                 created_at, revoked_at
@@ -1104,8 +1184,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ORDER BY created_at DESC LIMIT 200`,
       );
       return { signal_keys: result.rows };
-    }),
-  );
+    });
+  });
 
   /**
    * Retires a key with a grace period rather than revoking it outright. The
@@ -1155,23 +1235,27 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     });
   });
 
-  app.get('/v1/security-events', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/security-events', async (request) => {
+    // The forensic record of attacks, including this caller's own. Never an
+    // agent.
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT id, kind, source, subject_id, detail, created_at
            FROM scrutexity.security_events
           ORDER BY created_at DESC LIMIT 200`,
       );
       return { security_events: result.rows };
-    }),
-  );
+    });
+  });
 
   // ==========================================================================
   // Dashboard read model
   // ==========================================================================
 
-  app.get('/v1/overview', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/overview', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const agents = await client.query(
         'SELECT * FROM scrutexity.agents ORDER BY created_at ASC LIMIT 50',
       );
@@ -1211,8 +1295,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         recent_decisions: decisions.rows,
         live_signals: signals.rows.map(serializeSignal),
       };
-    }),
-  );
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -194,26 +194,39 @@ mutable "latest" key. Decisions pin `policy_version_id` **and** `policy_hash`.
 | **G-13** | No offline-verifiable evidence export                                                                                     | Low          | 52       |
 | **G-9**  | Unenforced self-report path still exists                                                                                  | Low          | —        |
 
-### G-14, expanded
+### G-14, expanded — **closed**
 
-`SCOPES.read` is declared in `auth.ts`, granted by the seed to every
-credential, and **checked by nothing**. Eleven GET routes call
-`db.withTenant(...)` with no scope check at all. The consequence is that an
-**agent credential can read `/v1/policy-versions`** and retrieve the full policy
-document that governs it — including thresholds, approver roles and decay
-rules.
+`SCOPES.read` was declared in `auth.ts`, granted by the seed to every
+credential, and **checked by nothing**. Eleven GET routes called
+`db.withTenant(...)` with no scope check at all, so an **agent credential could
+read `/v1/policy-versions`** and retrieve the full policy document that governs
+it — thresholds, approver roles, decay rules.
 
-That directly defeats a control the system otherwise takes seriously: refusals
-are carefully written not to leak policy internals, and the corrective handshake
-is deliberately constrained so a denied agent learns the next legitimate step
-and nothing more. An agent that can simply `GET` the policy has all of it.
+That defeated a control the system otherwise takes seriously: refusals are
+written not to leak policy internals, and the corrective handshake is
+deliberately narrow so a denied agent learns the next legitimate step and
+nothing more. An agent that could `GET` the policy had all of it. The same hole
+exposed `/v1/security-events` — the forensic record of attacks, including that
+agent's own — and `/v1/signal-keys`.
 
-The same hole exposes `/v1/security-events` — the forensic record of attacks,
-including attacks by that agent — and `/v1/signal-keys` to any agent in the
-tenant.
+Auditing it surfaced a second, related hole the original sweep had not named:
+per-resource reads were tenant-scoped but **not subject-scoped**, so any agent
+holding a decision, trace, receipt or lease id could read another agent's
+record. That is OWASP API #1, broken object-level authorization, and ids appear
+in URLs and logs.
 
-This is OWASP API #5, broken function-level authorization, and it is the
-cheapest of the high-severity fixes.
+**The fix, in two gates.** `requireOperatorRead` demands the new `audit:read`
+scope _and_ refuses agent principals outright — either alone would be too weak,
+since the scope keeps out credentials never meant to audit while the type check
+survives a misconfigured grant. `assertMayReadSubject` narrows per-resource
+reads to the agent that owns them, answering **404 rather than 403** because a
+403 confirms the record exists and turns the endpoint into an oracle for
+sweeping another agent's activity. Humans and services are not narrowed: an
+operator responding to an incident has to read across agents.
+
+Fifteen adversarial tests in `security.test.ts`, including one asserting a
+refusal body contains no policy fragment, and one asserting an operator can
+still read everything — a control nobody can operate gets turned off.
 
 ---
 
@@ -242,8 +255,9 @@ the system stands:
 
 Section 37 says comments are not controls. Two current claims fail that test:
 
-1. `auth.ts` says "agent credentials deliberately cannot administer the control
-   plane". True for writes, **false for reads** (G-14).
+1. ~~`auth.ts` says "agent credentials deliberately cannot administer the
+   control plane". True for writes, **false for reads**.~~ **Corrected**: the
+   comment now names the two functions and the test file that make it true.
 2. Any statement that evidence is tamper-_proof_ rather than tamper-_evident_.
    With database write access and the signing key, the chain can be rewritten
    consistently (G-11). The honest claim is "cryptographically tamper-evident
@@ -253,8 +267,8 @@ Section 37 says comments are not controls. Two current claims fail that test:
 
 ## Order of work
 
-1. **G-14** — enforce `read`, and split agent-readable from operator-readable.
-   Cheapest high-severity fix; one afternoon.
+1. ~~**G-14**~~ — **done.** `audit:read` plus subject scoping; also closed the
+   unnamed object-level hole the first sweep missed.
 2. **G-4** — `verifyAuthorityInvariants()` as a runtime security boundary with
    `AUTHORITY_INVARIANT_VIOLATION`. Also closes G-3 by re-verifying containment
    per decision rather than only at creation.

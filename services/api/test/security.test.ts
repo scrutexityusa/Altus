@@ -775,3 +775,136 @@ describe('hostile input', () => {
     expect(response.body.error.message).toBe('Not found.');
   });
 });
+
+/**
+ * ============================================================================
+ * Read authorization.
+ * ============================================================================
+ *
+ * The `read` scope was declared, granted by the seed, and checked by nothing.
+ * Eleven GET routes were open to any authenticated principal in the tenant,
+ * which meant an agent credential could fetch the policy document governing it
+ * and the security-event log recording its own attacks.
+ *
+ * These tests are the enforcement. A scope that is never asserted against is
+ * worse than an absent one: it reads as a control in every review.
+ */
+describe('an agent cannot read the control plane', () => {
+  const forbidden = [
+    ['the policy document that governs it', '/v1/policy-versions'],
+    ['the security event log', '/v1/security-events'],
+    ['signing key metadata', '/v1/signal-keys'],
+    ['the agent register', '/v1/agents'],
+    ['the operator overview', '/v1/overview'],
+    ['the approval queue', '/v1/approval-requests'],
+    ['unresolved executions', '/v1/executions/unresolved'],
+  ] as const;
+
+  for (const [what, path] of forbidden) {
+    it(`is refused ${what}`, async () => {
+      const response = await h.call('GET', path, h.tenant.tokens['treasury_agent']!);
+      expect(response.status, `${path} was readable by an agent`).toBe(403);
+    });
+  }
+
+  it('lets a human operator read all of them', async () => {
+    // The gate must not be so tight that the people who need the evidence
+    // cannot reach it -- a control nobody can operate gets turned off.
+    for (const [, path] of forbidden) {
+      const response = await h.call('GET', path, h.tenant.tokens['admin']!);
+      expect(response.status, `${path} was not readable by an operator`).toBe(200);
+    }
+  });
+
+  it('never leaks the policy document through a refusal', async () => {
+    const response = await h.call('GET', '/v1/policy-versions', h.tenant.tokens['treasury_agent']!);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain('max_amount');
+    expect(body).not.toContain('escalate');
+  });
+});
+
+describe('an agent cannot read another agent’s records', () => {
+  /** A decision belonging to treasury-agent, and one belonging to verification. */
+  async function treasuryDecision() {
+    await issueTreasuryLease(h);
+    const decision = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: `readauthz-${Math.random().toString(36).slice(2, 10)}` }),
+    );
+    expect(decision.body.decision).toBe('ALLOW');
+    return decision.body;
+  }
+
+  it('is refused another agent’s decision', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/authorization-decisions/${decision.decision_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    // NOT_FOUND rather than FORBIDDEN: a 403 confirms the record exists, which
+    // turns the endpoint into an oracle for sweeping another agent's activity.
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s trace, the richest read in the API', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s receipt', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/receipts/${decision.receipt_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s lease', async () => {
+    const lease = await issueTreasuryLease(h);
+    const stolen = await h.call(
+      'GET',
+      `/v1/authority-leases/${lease.id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('can still read its own decision and trace', async () => {
+    const decision = await treasuryDecision();
+    const own = await h.call(
+      'GET',
+      `/v1/authorization-decisions/${decision.decision_id}`,
+      h.tenant.tokens['treasury_agent']!,
+    );
+    expect(own.status).toBe(200);
+    const trace = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['treasury_agent']!,
+    );
+    expect(trace.status).toBe(200);
+  });
+
+  it('does not narrow a human investigating across agents', async () => {
+    // An operator responding to an incident has to read every agent's
+    // records. Subject scoping applies to agents only.
+    const decision = await treasuryDecision();
+    const asOperator = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['treasurer']!,
+    );
+    expect(asOperator.status).toBe(200);
+  });
+});

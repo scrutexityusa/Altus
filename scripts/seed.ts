@@ -226,6 +226,7 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
         principal: users['admin']!,
         scopes: [
           'read',
+          'audit:read',
           'admin:write',
           'leases:write',
           'policies:write',
@@ -237,13 +238,15 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
         key: 'treasurer',
         type: 'user' as const,
         principal: users['treasurer']!,
-        scopes: ['read', 'approvals:write'],
+        // audit:read so an approver can see the security event log and the
+        // policy they are approving under. Never granted to an agent.
+        scopes: ['read', 'audit:read', 'approvals:write'],
       },
       {
         key: 'cfo',
         type: 'user' as const,
         principal: users['cfo']!,
-        scopes: ['read', 'approvals:write'],
+        scopes: ['read', 'audit:read', 'approvals:write'],
       },
       {
         key: 'treasury_agent',
