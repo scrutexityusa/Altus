@@ -163,13 +163,16 @@ export class ScrutexityClient {
 
     if (!response.ok) {
       const error = payload['error'] as
-        | { code?: ErrorCode; reason_code?: string; message?: string; details?: unknown }
-        | undefined;
-      throw new ScrutexityError(error?.code ?? 'INTERNAL_ERROR', error?.message ?? 'request failed', {
-        reasonCode: error?.reason_code,
-        details: error?.details,
-        disclose: true,
-      });
+        { code?: ErrorCode; reason_code?: string; message?: string; details?: unknown } | undefined;
+      throw new ScrutexityError(
+        error?.code ?? 'INTERNAL_ERROR',
+        error?.message ?? 'request failed',
+        {
+          reasonCode: error?.reason_code,
+          details: error?.details,
+          disclose: true,
+        },
+      );
     }
     return payload as T;
   }
@@ -232,7 +235,10 @@ export class ScrutexityClient {
   }
 
   async requestAuthority(request: RequestAuthorityRequest) {
-    return this.#request<{ authority_lease: { id: string; expires_at: string }; receipt_id: string }>(
+    return this.#request<{
+      authority_lease: { id: string; expires_at: string };
+      receipt_id: string;
+    }>(
       'POST',
       '/v1/authority-leases',
       {
@@ -334,7 +340,9 @@ export class ScrutexityClient {
     const receipt =
       typeof receiptOrId === 'string' ? await this.getReceipt(receiptOrId) : receiptOrId;
 
-    const local = this.#receiptVerifier ? verifyReceiptOffline(receipt, this.#receiptVerifier) : null;
+    const local = this.#receiptVerifier
+      ? verifyReceiptOffline(receipt, this.#receiptVerifier)
+      : null;
     const remote = await this.#request<{ integrity: 'INTACT' | 'COMPROMISED' }>(
       'POST',
       `/v1/receipts/${encodeURIComponent(receipt.id)}/verify`,

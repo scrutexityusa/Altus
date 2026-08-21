@@ -84,9 +84,7 @@ const ID_PATTERN = /^[a-z]+_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 export function isId<K extends IdKind>(kind: K, value: unknown): value is Id<K> {
   return (
-    typeof value === 'string' &&
-    value.startsWith(`${ID_PREFIXES[kind]}_`) &&
-    ID_PATTERN.test(value)
+    typeof value === 'string' && value.startsWith(`${ID_PREFIXES[kind]}_`) && ID_PATTERN.test(value)
   );
 }
 

@@ -106,7 +106,11 @@ export function authorizeDelegation(
   }
 
   if (!policy.delegation.enabled) {
-    return reject('FORBIDDEN', 'DELEGATION_DISABLED', 'the governing policy does not permit delegation');
+    return reject(
+      'FORBIDDEN',
+      'DELEGATION_DISABLED',
+      'the governing policy does not permit delegation',
+    );
   }
 
   const childDepth = parent.depth + 1;
@@ -123,7 +127,8 @@ export function authorizeDelegation(
   const blockedActions = proposal.requested_grant.actions.filter((requested) =>
     policy.delegation.non_delegable_actions.some((forbidden) =>
       isWildcardPattern(requested)
-        ? requested.slice(0, -1).startsWith(forbidden.replace(/\*$/, '')) || actionMatches(forbidden, requested)
+        ? requested.slice(0, -1).startsWith(forbidden.replace(/\*$/, '')) ||
+          actionMatches(forbidden, requested)
         : actionMatches(forbidden, requested),
     ),
   );

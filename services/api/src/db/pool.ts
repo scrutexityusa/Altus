@@ -55,7 +55,10 @@ export function createDatabase(config: Config): Database {
             internal: { organizationId },
           });
         }
-        await client.query('SELECT set_config($1, $2, true)', ['scrutexity.org_id', organizationId]);
+        await client.query('SELECT set_config($1, $2, true)', [
+          'scrutexity.org_id',
+          organizationId,
+        ]);
       }
       const result = await fn(client);
       await client.query('COMMIT');

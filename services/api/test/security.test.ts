@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
-import { issueTreasuryLease, startHarness, wireRequest, ADMIN_URL, type Harness } from './harness.js';
+import {
+  issueTreasuryLease,
+  startHarness,
+  wireRequest,
+  ADMIN_URL,
+  type Harness,
+} from './harness.js';
 
 /**
  * The attacks from Section 23 and 29, run against the real service.
@@ -164,10 +170,28 @@ describe('tenant isolation', () => {
   });
 
   it('keeps each tenant evidence chain independent', async () => {
-    const a = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'chain-t1' }));
-    const b = await h.call('POST', '/v1/authorization/evaluate', h.other.tokens['treasury_agent']!, wireRequest({ nonce: 'chain-t2' }));
-    const first = await h.call('GET', `/v1/receipts/${a.body.receipt_id}`, h.tenant.tokens['admin']!);
-    const second = await h.call('GET', `/v1/receipts/${b.body.receipt_id}`, h.other.tokens['admin']!);
+    const a = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'chain-t1' }),
+    );
+    const b = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.other.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'chain-t2' }),
+    );
+    const first = await h.call(
+      'GET',
+      `/v1/receipts/${a.body.receipt_id}`,
+      h.tenant.tokens['admin']!,
+    );
+    const second = await h.call(
+      'GET',
+      `/v1/receipts/${b.body.receipt_id}`,
+      h.other.tokens['admin']!,
+    );
     // Sequence numbers advance independently: neither tenant learns the other's
     // decision rate from its own chain.
     expect(first.body.receipt.organization_id).toBe(h.tenant.organization_id);
@@ -180,7 +204,8 @@ describe('tenant isolation', () => {
     // last line of defence, and it is the one that holds if a handler forgets.
     const client = new pg.Client({
       connectionString:
-        process.env['DATABASE_URL'] ?? 'postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity',
+        process.env['DATABASE_URL'] ??
+        'postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity',
     });
     await client.connect();
     try {
@@ -205,18 +230,28 @@ describe('tenant isolation', () => {
 
 describe('privilege escalation by an agent', () => {
   it('cannot issue itself authority', async () => {
-    const response = await h.call('POST', '/v1/authority-leases', h.tenant.tokens['treasury_agent']!, {
-      agent_id: 'treasury-agent',
-      grant: { actions: ['*'], resources: { bank_account: ['*'] }, constraints: {} },
-      ttl_seconds: 3600,
-    });
+    const response = await h.call(
+      'POST',
+      '/v1/authority-leases',
+      h.tenant.tokens['treasury_agent']!,
+      {
+        agent_id: 'treasury-agent',
+        grant: { actions: ['*'], resources: { bank_account: ['*'] }, constraints: {} },
+        ttl_seconds: 3600,
+      },
+    );
     expect(response.status).toBe(403);
   });
 
   it('cannot author or activate policy', async () => {
-    const response = await h.call('POST', '/v1/policy-versions', h.tenant.tokens['treasury_agent']!, {
-      document: { apiVersion: 'scrutexity.dev/policy/v1' },
-    });
+    const response = await h.call(
+      'POST',
+      '/v1/policy-versions',
+      h.tenant.tokens['treasury_agent']!,
+      {
+        document: { apiVersion: 'scrutexity.dev/policy/v1' },
+      },
+    );
     expect(response.status).toBe(403);
   });
 
@@ -225,7 +260,10 @@ describe('privilege escalation by an agent', () => {
       'POST',
       '/v1/authorization/evaluate',
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'sec-self-approve', context: { ...wireRequest().context, amount: '250000.00' } }),
+      wireRequest({
+        nonce: 'sec-self-approve',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
     );
     const attempt = await h.call('POST', '/v1/approvals', h.tenant.tokens['treasury_agent']!, {
       approval_request_id: escalated.body.approval_request_id,
@@ -259,21 +297,26 @@ describe('privilege escalation by an agent', () => {
   });
 
   it('cannot delegate authority it does not hold', async () => {
-    const response = await h.call('POST', '/v1/delegations', h.tenant.tokens['verification_agent']!, {
-      issuer_agent_id: h.tenant.agents['treasury'],
-      delegate_agent_id: 'verification-agent',
-      parent_lease_id: lease.id,
-      grant: {
-        actions: ['counterparty.read'],
-        resources: { counterparty: ['cp_100'] },
-        constraints: {
-          max_amount: { currency: 'USD', amountMinor: '0' },
-          currencies: ['USD'],
-          allowed_counterparties: ['cp_100'],
+    const response = await h.call(
+      'POST',
+      '/v1/delegations',
+      h.tenant.tokens['verification_agent']!,
+      {
+        issuer_agent_id: h.tenant.agents['treasury'],
+        delegate_agent_id: 'verification-agent',
+        parent_lease_id: lease.id,
+        grant: {
+          actions: ['counterparty.read'],
+          resources: { counterparty: ['cp_100'] },
+          constraints: {
+            max_amount: { currency: 'USD', amountMinor: '0' },
+            currencies: ['USD'],
+            allowed_counterparties: ['cp_100'],
+          },
         },
+        ttl_seconds: 300,
       },
-      ttl_seconds: 300,
-    });
+    );
     expect(response.status).toBe(403);
   });
 });
@@ -424,26 +467,36 @@ describe('expired and revoked authority', () => {
     });
     expect(child.status).toBe(201);
 
-    const before = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['verification_agent']!, {
-      agent_id: 'verification-agent',
-      action: 'counterparty.read',
-      resource: { type: 'counterparty', id: 'cp_101' },
-      context: { counterparty_id: 'cp_101' },
-      authority_lease_id: child.body.child_lease.id,
-    });
+    const before = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['verification_agent']!,
+      {
+        agent_id: 'verification-agent',
+        action: 'counterparty.read',
+        resource: { type: 'counterparty', id: 'cp_101' },
+        context: { counterparty_id: 'cp_101' },
+        authority_lease_id: child.body.child_lease.id,
+      },
+    );
     expect(before.body.decision).toBe('ALLOW');
 
     await h.call('POST', `/v1/authority-leases/${parent.id}/revoke`, h.tenant.tokens['admin']!, {
       reason: 'security test',
     });
 
-    const after = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['verification_agent']!, {
-      agent_id: 'verification-agent',
-      action: 'counterparty.read',
-      resource: { type: 'counterparty', id: 'cp_101' },
-      context: { counterparty_id: 'cp_101' },
-      authority_lease_id: child.body.child_lease.id,
-    });
+    const after = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['verification_agent']!,
+      {
+        agent_id: 'verification-agent',
+        action: 'counterparty.read',
+        resource: { type: 'counterparty', id: 'cp_101' },
+        context: { counterparty_id: 'cp_101' },
+        authority_lease_id: child.body.child_lease.id,
+      },
+    );
     expect(after.body.decision).toBe('DENY');
     expect(after.body.reason_code).toBe('AUTHORITY_REVOKED');
   });
@@ -475,9 +528,19 @@ describe('expired and revoked authority', () => {
 describe('replay', () => {
   it('refuses a reused authorization nonce', async () => {
     const body = wireRequest({ nonce: 'sec-replay-nonce-1' });
-    const first = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, body);
+    const first = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      body,
+    );
     expect(first.status).toBe(200);
-    const second = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, body);
+    const second = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      body,
+    );
     expect(second.status).toBe(409);
     expect(second.body.error.code).toBe('REPLAY_DETECTED');
   });
@@ -512,12 +575,16 @@ describe('replay', () => {
       // moved the only way anything can move it: by time. Simulated here by
       // rewriting the row as the owner with the trigger temporarily off, which
       // is itself a check that the trigger exists.
-      await client.query('ALTER TABLE scrutexity.authorization_decisions DISABLE TRIGGER authorization_decisions_append_only');
+      await client.query(
+        'ALTER TABLE scrutexity.authorization_decisions DISABLE TRIGGER authorization_decisions_append_only',
+      );
       await client.query(
         `UPDATE scrutexity.authorization_decisions SET expires_at = now() - interval '1 second' WHERE id = $1`,
         [allowed.body.decision_id],
       );
-      await client.query('ALTER TABLE scrutexity.authorization_decisions ENABLE TRIGGER authorization_decisions_append_only');
+      await client.query(
+        'ALTER TABLE scrutexity.authorization_decisions ENABLE TRIGGER authorization_decisions_append_only',
+      );
     });
     const late = await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
       decision_id: allowed.body.decision_id,
@@ -580,9 +647,10 @@ describe('evidence integrity', () => {
   it('refuses to evaluate against a policy version that fails its integrity check', async () => {
     let original: string | undefined;
     await asOwner(async (client) => {
-      const before = await client.query('SELECT content FROM scrutexity.policy_versions WHERE id = $1', [
-        h.tenant.policy_version_id,
-      ]);
+      const before = await client.query(
+        'SELECT content FROM scrutexity.policy_versions WHERE id = $1',
+        [h.tenant.policy_version_id],
+      );
       original = JSON.stringify(before.rows[0].content);
       await client.query(
         `UPDATE scrutexity.policy_versions
@@ -611,10 +679,10 @@ describe('evidence integrity', () => {
       expect(again.status).toBe(503);
     } finally {
       await asOwner(async (client) => {
-        await client.query('UPDATE scrutexity.policy_versions SET content = $2::jsonb WHERE id = $1', [
-          h.tenant.policy_version_id,
-          original,
-        ]);
+        await client.query(
+          'UPDATE scrutexity.policy_versions SET content = $2::jsonb WHERE id = $1',
+          [h.tenant.policy_version_id, original],
+        );
       });
     }
 
@@ -653,10 +721,15 @@ describe('hostile input', () => {
   });
 
   it('refuses an unknown field rather than ignoring it', async () => {
-    const response = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, {
-      ...wireRequest(),
-      decision: 'ALLOW',
-    });
+    const response = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      {
+        ...wireRequest(),
+        decision: 'ALLOW',
+      },
+    );
     expect(response.status).toBe(400);
   });
 
@@ -673,15 +746,20 @@ describe('hostile input', () => {
   it('does not let a policy selector escape into the host language', async () => {
     // The predicate language has no expression evaluation to escape from;
     // hostile context values are compared, never executed.
-    const response = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, {
-      ...wireRequest({ nonce: 'sec-injection-1' }),
-      context: {
-        amount: '100.00',
-        currency: 'USD',
-        counterparty_id: "cp_100'; DROP TABLE scrutexity.receipts; --",
-        destination_country: 'US',
+    const response = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      {
+        ...wireRequest({ nonce: 'sec-injection-1' }),
+        context: {
+          amount: '100.00',
+          currency: 'USD',
+          counterparty_id: "cp_100'; DROP TABLE scrutexity.receipts; --",
+          destination_country: 'US',
+        },
       },
-    });
+    );
     expect([200, 400]).toContain(response.status);
     const stillThere = await h.call('GET', '/v1/overview', h.tenant.tokens['admin']!);
     expect(stillThere.status).toBe(200);

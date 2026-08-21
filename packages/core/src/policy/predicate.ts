@@ -43,7 +43,11 @@ function compare(observed: PolicyValue, operand: unknown): -1 | 0 | 1 | null {
 
 function scalarEquals(observed: PolicyValue, operand: unknown): boolean {
   if (isMoney(operand)) {
-    return isMoney(observed) && observed.currency === operand.currency && compareMoney(observed, operand) === 0;
+    return (
+      isMoney(observed) &&
+      observed.currency === operand.currency &&
+      compareMoney(observed, operand) === 0
+    );
   }
   if (isDecimalString(operand) && typeof observed === 'string' && isDecimalString(observed)) {
     return compareDecimal(observed, operand) === 0;
@@ -69,13 +73,21 @@ export function evaluateMatcher(
   if (matcher.eq !== undefined) record('eq', matcher.eq, scalarEquals(observed, matcher.eq));
   if (matcher.neq !== undefined) record('neq', matcher.neq, !scalarEquals(observed, matcher.neq));
   if (matcher.in !== undefined) {
-    record('in', matcher.in, matcher.in.some((candidate) => scalarEquals(observed, candidate)));
+    record(
+      'in',
+      matcher.in,
+      matcher.in.some((candidate) => scalarEquals(observed, candidate)),
+    );
   }
   if (matcher.nin !== undefined) {
     record('nin', matcher.nin, !matcher.nin.some((candidate) => scalarEquals(observed, candidate)));
   }
   if (matcher.prefix !== undefined) {
-    record('prefix', matcher.prefix, typeof observed === 'string' && observed.startsWith(matcher.prefix));
+    record(
+      'prefix',
+      matcher.prefix,
+      typeof observed === 'string' && observed.startsWith(matcher.prefix),
+    );
   }
 
   for (const [operator, operand] of [

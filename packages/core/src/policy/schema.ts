@@ -60,7 +60,9 @@ export const MatcherSchema = z
     prefix: z.string().min(1).optional(),
   })
   .strict()
-  .refine((m) => Object.keys(m).length > 0, { message: 'matcher must declare at least one operator' });
+  .refine((m) => Object.keys(m).length > 0, {
+    message: 'matcher must declare at least one operator',
+  });
 
 export type Matcher = z.infer<typeof MatcherSchema>;
 
@@ -92,82 +94,88 @@ export interface Condition {
  * with all_of / any_of / not. Bare selector keys are sugar for `match`.
  */
 export const ConditionSchema: z.ZodType<Condition> = z.lazy(() =>
-  z
-    .record(z.string(), z.unknown())
-    .transform((raw, ctx): Condition => {
-      const condition: Condition = {};
-      const match: Record<string, Matcher> = {};
+  z.record(z.string(), z.unknown()).transform((raw, ctx): Condition => {
+    const condition: Condition = {};
+    const match: Record<string, Matcher> = {};
 
-      for (const [key, value] of Object.entries(raw)) {
-        if (key === 'all_of' || key === 'any_of') {
-          const parsed = z.array(ConditionSchema).min(1).safeParse(value);
-          if (!parsed.success) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${key}: ${parsed.error.message}`, path: [key] });
-            continue;
-          }
-          condition[key] = parsed.data;
-          continue;
-        }
-        if (key === 'match') {
-          // Already-normalised form. A stored policy must re-parse to itself,
-          // or its hash would change every time it round-trips through the
-          // database and the evidence chain would stop meaning anything.
-          const parsed = z.record(SelectorKey, MatcherSchema).safeParse(value);
-          if (!parsed.success) {
-            ctx.addIssue({
-              code: z.ZodIssueCode.custom,
-              message: `match: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-              path: [key],
-            });
-            continue;
-          }
-          Object.assign(match, parsed.data);
-          continue;
-        }
-        if (key === 'not') {
-          const parsed = ConditionSchema.safeParse(value);
-          if (!parsed.success) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not: ${parsed.error.message}`, path: [key] });
-            continue;
-          }
-          condition.not = parsed.data;
-          continue;
-        }
-
-        const selector = SelectorKey.safeParse(key);
-        if (!selector.success) {
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === 'all_of' || key === 'any_of') {
+        const parsed = z.array(ConditionSchema).min(1).safeParse(value);
+        if (!parsed.success) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: `unknown selector "${key}"`,
+            message: `${key}: ${parsed.error.message}`,
             path: [key],
           });
           continue;
         }
-        // Sugar: `action: wire.execute` means `action: { eq: wire.execute }`.
-        const matcherInput =
-          value !== null && typeof value === 'object' && !Array.isArray(value)
-            ? value
-            : Array.isArray(value)
-              ? { in: value }
-              : { eq: value };
-        const matcher = MatcherSchema.safeParse(matcherInput);
-        if (!matcher.success) {
+        condition[key] = parsed.data;
+        continue;
+      }
+      if (key === 'match') {
+        // Already-normalised form. A stored policy must re-parse to itself,
+        // or its hash would change every time it round-trips through the
+        // database and the evidence chain would stop meaning anything.
+        const parsed = z.record(SelectorKey, MatcherSchema).safeParse(value);
+        if (!parsed.success) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: `${key}: ${matcher.error.issues.map((i) => i.message).join('; ')}`,
+            message: `match: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
             path: [key],
           });
           continue;
         }
-        match[key] = matcher.data;
+        Object.assign(match, parsed.data);
+        continue;
+      }
+      if (key === 'not') {
+        const parsed = ConditionSchema.safeParse(value);
+        if (!parsed.success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `not: ${parsed.error.message}`,
+            path: [key],
+          });
+          continue;
+        }
+        condition.not = parsed.data;
+        continue;
       }
 
-      if (Object.keys(match).length > 0) condition.match = match;
-      if (Object.keys(condition).length === 0) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'condition is empty' });
+      const selector = SelectorKey.safeParse(key);
+      if (!selector.success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `unknown selector "${key}"`,
+          path: [key],
+        });
+        continue;
       }
-      return condition;
-    }),
+      // Sugar: `action: wire.execute` means `action: { eq: wire.execute }`.
+      const matcherInput =
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+          ? value
+          : Array.isArray(value)
+            ? { in: value }
+            : { eq: value };
+      const matcher = MatcherSchema.safeParse(matcherInput);
+      if (!matcher.success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${key}: ${matcher.error.issues.map((i) => i.message).join('; ')}`,
+          path: [key],
+        });
+        continue;
+      }
+      match[key] = matcher.data;
+    }
+
+    if (Object.keys(match).length > 0) condition.match = match;
+    if (Object.keys(condition).length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'condition is empty' });
+    }
+    return condition;
+  }),
 );
 
 // ---------------------------------------------------------------------------
@@ -255,7 +263,10 @@ export const PolicyDocumentSchema = z
       .object({
         /** Decision when no rule matches. Fail-closed by construction. */
         decision: z.enum(DECISIONS).default('DENY'),
-        reason_code: z.string().regex(/^[A-Z][A-Z0-9_]{2,63}$/).default('NO_RULE_MATCHED'),
+        reason_code: z
+          .string()
+          .regex(/^[A-Z][A-Z0-9_]{2,63}$/)
+          .default('NO_RULE_MATCHED'),
         /** Lifetime of the execution grant an ALLOW confers. */
         execution_grant_ttl_seconds: z.number().int().min(5).max(86_400).default(300),
       })

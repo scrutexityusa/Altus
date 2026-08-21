@@ -85,6 +85,15 @@ describe('demo scene 3 -- a $250,000 wire escalates', () => {
       constraint: 'max_amount',
     });
   });
+
+  it('explains the escalation by what triggered it, not by restating it', () => {
+    const explanation = explainDecision(result, { agent_handle: 'treasury-agent' });
+    expect(explanation.headline).toBe('HUMAN APPROVAL REQUIRED');
+    // The reason code names who must decide; the explanation must also say why.
+    expect(explanation.facts.why).toContain('exceeds the 50000.00 USD ceiling');
+    expect(explanation.facts.why).toContain('must approve');
+    expect(explanation.facts.policy).toContain('Approval by 1 person from treasurer');
+  });
 });
 
 describe('demo scene 4 -- the treasurer approves', () => {
@@ -135,14 +144,21 @@ describe('human approval is not a boolean', () => {
   });
 
   it('refuses an approval from someone who did not hold the required role', () => {
-    const result = escalated([approval({ approver_user_id: 'user_intern', roles_at_decision: ['analyst'] })]);
+    const result = escalated([
+      approval({ approver_user_id: 'user_intern', roles_at_decision: ['analyst'] }),
+    ]);
     expect(result.decision).toBe('ESCALATE');
     expect(result.approval_state?.discounted[0]?.reason).toBe('APPROVER_HELD_NO_REQUIRED_ROLE');
   });
 
   it('treats a rejection as terminal, not as a vote to be outnumbered', () => {
     const result = escalated([
-      approval({ id: 'apv_reject', approver_user_id: 'user_cfo', roles_at_decision: ['cfo', 'treasurer'], vote: 'REJECTED' }),
+      approval({
+        id: 'apv_reject',
+        approver_user_id: 'user_cfo',
+        roles_at_decision: ['cfo', 'treasurer'],
+        vote: 'REJECTED',
+      }),
       approval({ id: 'apv_ok', approver_user_id: 'user_treasurer' }),
     ]);
     expect(result.decision).toBe('DENY');
@@ -211,8 +227,16 @@ describe('human approval is not a boolean', () => {
           requirement: dualRequirement,
           approvals: [
             // Assigned first if ordering were naive, consuming "treasurer".
-            approval({ id: 'apv_a', approver_user_id: 'user_both', roles_at_decision: ['treasurer', 'cfo'] }),
-            approval({ id: 'apv_b', approver_user_id: 'user_t_only', roles_at_decision: ['treasurer'] }),
+            approval({
+              id: 'apv_a',
+              approver_user_id: 'user_both',
+              roles_at_decision: ['treasurer', 'cfo'],
+            }),
+            approval({
+              id: 'apv_b',
+              approver_user_id: 'user_t_only',
+              roles_at_decision: ['treasurer'],
+            }),
           ],
           expires_at: new Date(T0.getTime() + 3_600_000).toISOString(),
         },
@@ -390,19 +414,38 @@ describe('failure modes are policy data, not a global switch', () => {
 
 describe('determinism', () => {
   it('produces byte-identical output for identical inputs', () => {
-    const once = evaluateAuthorization(snapshot({ amount: '250000', signals: [signal({ value: '0.5' })] }));
-    const twice = evaluateAuthorization(snapshot({ amount: '250000', signals: [signal({ value: '0.5' })] }));
+    const once = evaluateAuthorization(
+      snapshot({ amount: '250000', signals: [signal({ value: '0.5' })] }),
+    );
+    const twice = evaluateAuthorization(
+      snapshot({ amount: '250000', signals: [signal({ value: '0.5' })] }),
+    );
     expect(JSON.stringify(once)).toBe(JSON.stringify(twice));
   });
 
   it('selects the same lease when several could apply', () => {
     const a = lease({ id: 'lease_aaa' });
-    const b = lease({ id: 'lease_bbb', grant: grant({ constraints: { max_amount: parseMoney('10', 'USD') } }) });
+    const b = lease({
+      id: 'lease_bbb',
+      grant: grant({ constraints: { max_amount: parseMoney('10', 'USD') } }),
+    });
     const forwards = evaluateAuthorization(
-      snapshot({ amount: '25000', candidates: [{ lease: a, chain: [a] }, { lease: b, chain: [b] }] }),
+      snapshot({
+        amount: '25000',
+        candidates: [
+          { lease: a, chain: [a] },
+          { lease: b, chain: [b] },
+        ],
+      }),
     );
     const backwards = evaluateAuthorization(
-      snapshot({ amount: '25000', candidates: [{ lease: b, chain: [b] }, { lease: a, chain: [a] }] }),
+      snapshot({
+        amount: '25000',
+        candidates: [
+          { lease: b, chain: [b] },
+          { lease: a, chain: [a] },
+        ],
+      }),
     );
     expect(forwards.authority_lease_id).toBe(backwards.authority_lease_id);
     expect(forwards.decision).toBe('ALLOW');

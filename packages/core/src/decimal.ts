@@ -57,8 +57,11 @@ export function compareDecimal(a: string, b: string): -1 | 0 | 1 {
   const rightNeg = right.startsWith('-');
   if (leftNeg !== rightNeg) return leftNeg ? -1 : 1;
 
-  const magnitude = compareMagnitude(leftNeg ? left.slice(1) : left, rightNeg ? right.slice(1) : right);
-  return (leftNeg ? (-magnitude as -1 | 0 | 1) : magnitude);
+  const magnitude = compareMagnitude(
+    leftNeg ? left.slice(1) : left,
+    rightNeg ? right.slice(1) : right,
+  );
+  return leftNeg ? (-magnitude as -1 | 0 | 1) : magnitude;
 }
 
 function compareMagnitude(a: string, b: string): -1 | 0 | 1 {

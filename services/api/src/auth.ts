@@ -49,10 +49,7 @@ export async function authenticate(db: Database, header: string | undefined): Pr
 
   const [, prefix] = match;
   const row = await db.withoutTenant(async (client: PoolClient) => {
-    const result = await client.query(
-      'SELECT * FROM scrutexity.resolve_credential($1)',
-      [prefix],
-    );
+    const result = await client.query('SELECT * FROM scrutexity.resolve_credential($1)', [prefix]);
     return result.rows[0] as
       | {
           id: string;

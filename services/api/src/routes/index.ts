@@ -65,7 +65,14 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         const hit = await claimIdempotencyKey(client, organizationId, endpoint, key, request.body);
         if (hit) return { status: hit.status_code, body: hit.body as T };
         const result = await handler(client);
-        await completeIdempotencyKey(client, organizationId, endpoint, key, result.status, result.body);
+        await completeIdempotencyKey(
+          client,
+          organizationId,
+          endpoint,
+          key,
+          result.status,
+          result.body,
+        );
         return result;
       }
       return handler(client);
@@ -79,31 +86,38 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/agents', async (request, reply) => {
     requireScope(request.principal, SCOPES.adminWrite);
     const body = CreateAgentSchema.parse(request.body);
-    const { status, body: payload } = await mutate(request as never, 'POST /v1/agents', async (client) => {
-      const id = newId('agent');
-      try {
-        const result = await client.query(
-          `INSERT INTO scrutexity.agents
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/agents',
+      async (client) => {
+        const id = newId('agent');
+        try {
+          const result = await client.query(
+            `INSERT INTO scrutexity.agents
              (id, organization_id, handle, display_name, description, owner_user_id, metadata)
            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [
-            id,
-            request.principal.organization_id,
-            body.handle,
-            body.display_name,
-            body.description ?? null,
-            body.owner_user_id ?? null,
-            JSON.stringify(body.metadata),
-          ],
-        );
-        return { status: 201, body: { agent: serializeAgent(result.rows[0]) } };
-      } catch (error) {
-        if ((error as { code?: string }).code === '23505') {
-          throw new ScrutexityError('STATE_CONFLICT', `an agent with handle "${body.handle}" already exists`);
+            [
+              id,
+              request.principal.organization_id,
+              body.handle,
+              body.display_name,
+              body.description ?? null,
+              body.owner_user_id ?? null,
+              JSON.stringify(body.metadata),
+            ],
+          );
+          return { status: 201, body: { agent: serializeAgent(result.rows[0]) } };
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError(
+              'STATE_CONFLICT',
+              `an agent with handle "${body.handle}" already exists`,
+            );
+          }
+          throw error;
         }
-        throw error;
-      }
-    });
+      },
+    );
     reply.code(status).send(payload);
   });
 
@@ -184,7 +198,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           revocable: body.revocable,
           metadata: body.metadata,
         });
-        return { status: 201, body: { authority_lease: result.lease, receipt_id: result.receipt_id } };
+        return {
+          status: 201,
+          body: { authority_lease: result.lease, receipt_id: result.receipt_id },
+        };
       },
     );
     reply.code(status).send(payload);
@@ -200,7 +217,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
          ) SELECT * FROM chain ORDER BY depth ASC`,
         [request.params.id],
       );
-      if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'authority lease not found');
+      if (result.rowCount === 0)
+        throw new ScrutexityError('NOT_FOUND', 'authority lease not found');
       const rows = (result.rows as LeaseRow[]).map(toLease);
       const lease = rows.find((l) => l.id === request.params.id)!;
       return { authority_lease: lease, ancestry: rows };
@@ -232,7 +250,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     // An agent credential may only delegate authority it itself holds.
     if (request.principal.type === 'agent' && request.principal.id !== body.issuer_agent_id) {
       throw new ScrutexityError('FORBIDDEN', 'an agent may only delegate its own authority', {
-        internal: { credential_principal: request.principal.id, claimed_issuer: body.issuer_agent_id },
+        internal: {
+          credential_principal: request.principal.id,
+          claimed_issuer: body.issuer_agent_id,
+        },
       });
     }
 
@@ -313,14 +334,20 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   };
 
   app.post('/v1/authorization-requests', async (request, reply) => {
-    const { status, body } = await evaluateHandler(request as never, 'POST /v1/authorization-requests');
+    const { status, body } = await evaluateHandler(
+      request as never,
+      'POST /v1/authorization-requests',
+    );
     reply.code(status).send(body);
   });
 
   // Verb-shaped alias of the endpoint above, sharing one implementation. It
   // exists because SDK callers reach for a verb, not a resource.
   app.post('/v1/authorization/evaluate', async (request, reply) => {
-    const { status, body } = await evaluateHandler(request as never, 'POST /v1/authorization/evaluate');
+    const { status, body } = await evaluateHandler(
+      request as never,
+      'POST /v1/authorization/evaluate',
+    );
     reply.code(status).send(body);
   });
 
@@ -340,8 +367,23 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           WHERE d.id = $1`,
         [request.params.id],
       );
-      if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
+      if (result.rowCount === 0)
+        throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
       const row = result.rows[0];
+
+      // When the acting authority was delegated, name the agent that granted
+      // it. The explanation is materially different -- "that authority was
+      // delegated by X" is what tells an operator where to look.
+      const delegatedBy = row.authority_lease_id
+        ? await client.query(
+            `SELECT issuer.handle
+               FROM scrutexity.authority_leases child
+               JOIN scrutexity.authority_leases parent ON parent.id = child.parent_lease_id
+               JOIN scrutexity.agents issuer ON issuer.id = parent.agent_id
+              WHERE child.id = $1`,
+            [row.authority_lease_id],
+          )
+        : null;
 
       const approvals = await client.query(
         `SELECT ap.id, ap.approver_user_id, ap.vote, ap.roles_at_decision, ap.satisfied_role,
@@ -404,7 +446,12 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         approvals: approvals.rows,
         receipt: receipt.rows[0] ?? null,
         execution: execution.rows[0] ?? null,
-        explanation: explainDecision(evaluation as never, { agent_handle: row.agent_handle }),
+        explanation: explainDecision(evaluation as never, {
+          agent_handle: row.agent_handle,
+          ...(delegatedBy?.rows[0]
+            ? { delegated_by_handle: delegatedBy.rows[0].handle as string }
+            : {}),
+        }),
       };
     }),
   );
@@ -441,21 +488,25 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/signals', async (request, reply) => {
     requireScope(request.principal, SCOPES.signalWrite);
     const body = IngestSignalSchema.parse(request.body);
-    const { status, body: payload } = await mutate(request as never, 'POST /v1/signals', async (client) => {
-      const result = await ingestSignal(client, keys, {
-        organizationId: request.principal.organization_id,
-        subjectType: body.subject.type,
-        subjectId: body.subject.id,
-        signalType: body.signal_type,
-        value: body.value,
-        confidence: body.confidence,
-        source: body.source,
-        ttlSeconds: body.ttl_seconds,
-        issuedAt: body.issued_at,
-        metadata: body.metadata,
-      });
-      return { status: 201, body: result };
-    });
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/signals',
+      async (client) => {
+        const result = await ingestSignal(client, keys, {
+          organizationId: request.principal.organization_id,
+          subjectType: body.subject.type,
+          subjectId: body.subject.id,
+          signalType: body.signal_type,
+          value: body.value,
+          confidence: body.confidence,
+          source: body.source,
+          ttlSeconds: body.ttl_seconds,
+          issuedAt: body.issued_at,
+          metadata: body.metadata,
+        });
+        return { status: 201, body: result };
+      },
+    );
     reply.code(status).send(payload);
   });
 
@@ -577,7 +628,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     requireHuman(request.principal);
     const body = CreatePolicyVersionSchema.parse(request.body);
     const loaded =
-      typeof body.document === 'string' ? loadPolicyYaml(body.document) : loadPolicyDocument(body.document);
+      typeof body.document === 'string'
+        ? loadPolicyYaml(body.document)
+        : loadPolicyDocument(body.document);
 
     const { status, body: payload } = await mutate(
       request as never,
@@ -617,7 +670,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
               previous.rows[0]?.id ?? null,
             ],
           );
-          return { status: 201, body: { policy_version: serializePolicyVersion(inserted.rows[0]) } };
+          return {
+            status: 201,
+            body: { policy_version: serializePolicyVersion(inserted.rows[0]) },
+          };
         } catch (error) {
           if ((error as { code?: string }).code === '23505') {
             throw new ScrutexityError(
@@ -636,66 +692,76 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
    * Dual control on activation (Section 32). Two distinct humans, neither of
    * them the author, must approve before a policy version can take effect.
    */
-  app.post<{ Params: { id: string } }>('/v1/policy-versions/:id/reviews', async (request, reply) => {
-    requireScope(request.principal, SCOPES.policyWrite);
-    requireHuman(request.principal);
-    const body = ReviewPolicyVersionSchema.parse(request.body);
+  app.post<{ Params: { id: string } }>(
+    '/v1/policy-versions/:id/reviews',
+    async (request, reply) => {
+      requireScope(request.principal, SCOPES.policyWrite);
+      requireHuman(request.principal);
+      const body = ReviewPolicyVersionSchema.parse(request.body);
 
-    const result = await db.withTenant(request.principal.organization_id, async (client) => {
-      const version = await client.query(
-        'SELECT * FROM scrutexity.policy_versions WHERE id = $1 FOR UPDATE',
-        [request.params.id],
-      );
-      if (version.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'policy version not found');
-      const row = version.rows[0];
-      if (!['DRAFT', 'REVIEW'].includes(row.status)) {
-        throw new ScrutexityError('STATE_CONFLICT', `a ${row.status} policy version cannot be reviewed`);
-      }
-      if (row.author_user_id === request.principal.id) {
-        throw new ScrutexityError('FORBIDDEN', 'the author of a policy version may not review it');
-      }
+      const result = await db.withTenant(request.principal.organization_id, async (client) => {
+        const version = await client.query(
+          'SELECT * FROM scrutexity.policy_versions WHERE id = $1 FOR UPDATE',
+          [request.params.id],
+        );
+        if (version.rowCount === 0)
+          throw new ScrutexityError('NOT_FOUND', 'policy version not found');
+        const row = version.rows[0];
+        if (!['DRAFT', 'REVIEW'].includes(row.status)) {
+          throw new ScrutexityError(
+            'STATE_CONFLICT',
+            `a ${row.status} policy version cannot be reviewed`,
+          );
+        }
+        if (row.author_user_id === request.principal.id) {
+          throw new ScrutexityError(
+            'FORBIDDEN',
+            'the author of a policy version may not review it',
+          );
+        }
 
-      try {
-        await client.query(
-          `INSERT INTO scrutexity.policy_version_reviews
+        try {
+          await client.query(
+            `INSERT INTO scrutexity.policy_version_reviews
              (id, organization_id, policy_version_id, reviewer_user_id, vote, comment)
            VALUES ($1,$2,$3,$4,$5,$6)`,
-          [
-            newId('policyReview'),
-            request.principal.organization_id,
-            row.id,
-            request.principal.id,
-            body.vote,
-            body.comment ?? null,
-          ],
-        );
-      } catch (error) {
-        if ((error as { code?: string }).code === '23505') {
-          throw new ScrutexityError('STATE_CONFLICT', 'this reviewer has already voted');
+            [
+              newId('policyReview'),
+              request.principal.organization_id,
+              row.id,
+              request.principal.id,
+              body.vote,
+              body.comment ?? null,
+            ],
+          );
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError('STATE_CONFLICT', 'this reviewer has already voted');
+          }
+          throw error;
         }
-        throw error;
-      }
 
-      const votes = await client.query(
-        'SELECT vote FROM scrutexity.policy_version_reviews WHERE policy_version_id = $1',
-        [row.id],
-      );
-      const approvals = votes.rows.filter((v) => v.vote === 'APPROVED').length;
-      const rejected = votes.rows.some((v) => v.vote === 'REJECTED');
+        const votes = await client.query(
+          'SELECT vote FROM scrutexity.policy_version_reviews WHERE policy_version_id = $1',
+          [row.id],
+        );
+        const approvals = votes.rows.filter((v) => v.vote === 'APPROVED').length;
+        const rejected = votes.rows.some((v) => v.vote === 'REJECTED');
 
-      const nextStatus = rejected ? 'DRAFT' : approvals >= 2 ? 'APPROVED' : 'REVIEW';
-      await client.query(
-        `UPDATE scrutexity.policy_versions
+        const nextStatus = rejected ? 'DRAFT' : approvals >= 2 ? 'APPROVED' : 'REVIEW';
+        await client.query(
+          `UPDATE scrutexity.policy_versions
             SET status = $2, approved_at = CASE WHEN $2 = 'APPROVED' THEN now() ELSE NULL END
           WHERE id = $1`,
-        [row.id, nextStatus],
-      );
+          [row.id, nextStatus],
+        );
 
-      return { policy_version_id: row.id, status: nextStatus, approvals, rejected };
-    });
+        return { policy_version_id: row.id, status: nextStatus, approvals, rejected };
+      });
 
-    reply.code(201).send(result);
-  });
+      reply.code(201).send(result);
+    },
+  );
 
   app.post<{ Params: { id: string } }>('/v1/policy-versions/:id/activate', async (request) => {
     requireScope(request.principal, SCOPES.policyWrite);
@@ -705,7 +771,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         'SELECT * FROM scrutexity.policy_versions WHERE id = $1 FOR UPDATE',
         [request.params.id],
       );
-      if (version.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'policy version not found');
+      if (version.rowCount === 0)
+        throw new ScrutexityError('NOT_FOUND', 'policy version not found');
       const row = version.rows[0];
       if (row.status !== 'APPROVED') {
         throw new ScrutexityError(
@@ -716,7 +783,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       // Integrity check before a document takes effect over live money.
       const recomputed = hashObject(loadPolicyDocument(row.content).document);
       if (recomputed !== row.content_hash) {
-        throw new ScrutexityError('EVIDENCE_TAMPERED', 'the policy version failed its integrity check');
+        throw new ScrutexityError(
+          'EVIDENCE_TAMPERED',
+          'the policy version failed its integrity check',
+        );
       }
 
       await client.query(
@@ -771,7 +841,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
   app.get('/v1/overview', async (request) =>
     db.withTenant(request.principal.organization_id, async (client) => {
-      const agents = await client.query('SELECT * FROM scrutexity.agents ORDER BY created_at ASC LIMIT 50');
+      const agents = await client.query(
+        'SELECT * FROM scrutexity.agents ORDER BY created_at ASC LIMIT 50',
+      );
       const leases = await client.query(
         `SELECT * FROM scrutexity.authority_leases
           WHERE status = 'ACTIVE' AND expires_at > now()
@@ -860,9 +932,10 @@ function serializePolicyVersion(row: Record<string, unknown>) {
 }
 
 async function resolveAgentId(client: PoolClient, handleOrId: string): Promise<string> {
-  const result = await client.query('SELECT id FROM scrutexity.agents WHERE id = $1 OR handle = $1', [
-    handleOrId,
-  ]);
+  const result = await client.query(
+    'SELECT id FROM scrutexity.agents WHERE id = $1 OR handle = $1',
+    [handleOrId],
+  );
   if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'agent not found');
   return result.rows[0]!.id as string;
 }
@@ -872,7 +945,8 @@ async function decisionAgentId(client: PoolClient, decisionId: string): Promise<
     'SELECT agent_id FROM scrutexity.authorization_decisions WHERE id = $1',
     [decisionId],
   );
-  if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
+  if (result.rowCount === 0)
+    throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
   return result.rows[0]!.agent_id as string;
 }
 

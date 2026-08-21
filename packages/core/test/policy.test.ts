@@ -1,25 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { evaluatePolicy, mergeApprovalRequirements, policyHash, strictest } from '../src/policy/engine.js';
+import {
+  evaluatePolicy,
+  mergeApprovalRequirements,
+  policyHash,
+  strictest,
+} from '../src/policy/engine.js';
 import { loadPolicyDocument, loadPolicyYaml } from '../src/policy/loader.js';
 import { ScrutexityError } from '../src/errors.js';
 import { parseMoney } from '../src/money.js';
 import { signal, treasuryPolicy } from './fixtures.js';
 
-const input = (overrides: Record<string, unknown> = {}) => ({
-  action: 'wire.execute',
-  agent: { id: 'agent_treasury', handle: 'treasury-agent' },
-  resource: { type: 'bank_account', id: 'acct_001', attributes: {} },
-  context: {
-    amount: parseMoney('25000', 'USD'),
-    currency: 'USD',
-    counterparty_id: 'cp_100',
-    counterparty_known: true,
-    destination_country: 'US',
-  } as Record<string, unknown>,
-  authority: { present: true, lease_id: null, depth: null },
-  signals: [],
-  ...overrides,
-}) as Parameters<typeof evaluatePolicy>[1];
+const input = (overrides: Record<string, unknown> = {}) =>
+  ({
+    action: 'wire.execute',
+    agent: { id: 'agent_treasury', handle: 'treasury-agent' },
+    resource: { type: 'bank_account', id: 'acct_001', attributes: {} },
+    context: {
+      amount: parseMoney('25000', 'USD'),
+      currency: 'USD',
+      counterparty_id: 'cp_100',
+      counterparty_known: true,
+      destination_country: 'US',
+    } as Record<string, unknown>,
+    authority: { present: true, lease_id: null, depth: null },
+    signals: [],
+    ...overrides,
+  }) as Parameters<typeof evaluatePolicy>[1];
 
 describe('policy document validation', () => {
   it('loads the shipped treasury pack', () => {
@@ -106,7 +112,10 @@ describe('policy evaluation', () => {
   });
 
   it('allows a routine low-value wire', () => {
-    const outcome = evaluatePolicy(treasuryPolicy, input({ context: { ...input().context, amount: parseMoney('5000', 'USD') } }));
+    const outcome = evaluatePolicy(
+      treasuryPolicy,
+      input({ context: { ...input().context, amount: parseMoney('5000', 'USD') } }),
+    );
     expect(outcome.decision).toBe('ALLOW');
     expect(outcome.reason_code).toBe('BELOW_AUTONOMOUS_THRESHOLD');
   });
@@ -148,7 +157,13 @@ describe('policy evaluation', () => {
   it('lets a DENY override a matched ALLOW at the same evaluation', () => {
     const outcome = evaluatePolicy(
       treasuryPolicy,
-      input({ context: { ...input().context, amount: parseMoney('5000', 'USD'), counterparty_known: false } }),
+      input({
+        context: {
+          ...input().context,
+          amount: parseMoney('5000', 'USD'),
+          counterparty_known: false,
+        },
+      }),
     );
     expect(outcome.decision).toBe('DENY');
     expect(outcome.reason_code).toBe('UNKNOWN_COUNTERPARTY');
@@ -158,7 +173,13 @@ describe('policy evaluation', () => {
   it('denies a sanctioned destination outright', () => {
     const outcome = evaluatePolicy(
       treasuryPolicy,
-      input({ context: { ...input().context, amount: parseMoney('100', 'USD'), destination_country: 'KP' } }),
+      input({
+        context: {
+          ...input().context,
+          amount: parseMoney('100', 'USD'),
+          destination_country: 'KP',
+        },
+      }),
     );
     expect(outcome.decision).toBe('DENY');
     expect(outcome.reason_code).toBe('SANCTIONED_DESTINATION');
@@ -207,7 +228,10 @@ describe('policy evaluation', () => {
 
   it('compares the fraud threshold exactly at the boundary', () => {
     const at = evaluatePolicy(treasuryPolicy, input({ signals: [signal({ value: '0.9' })] }));
-    const below = evaluatePolicy(treasuryPolicy, input({ signals: [signal({ value: '0.8999999' })] }));
+    const below = evaluatePolicy(
+      treasuryPolicy,
+      input({ signals: [signal({ value: '0.8999999' })] }),
+    );
     expect(at.decision).toBe('ESCALATE');
     expect(below.decision).toBe('ALLOW');
   });
@@ -221,7 +245,10 @@ describe('policy evaluation', () => {
   });
 
   it('does not match a numeric comparison against a missing value', () => {
-    const outcome = evaluatePolicy(treasuryPolicy, input({ context: { counterparty_known: true } }));
+    const outcome = evaluatePolicy(
+      treasuryPolicy,
+      input({ context: { counterparty_known: true } }),
+    );
     // No amount at all: none of the amount rules may fire, so the default holds.
     expect(outcome.matched_rule_ids).toEqual([]);
     expect(outcome.decision).toBe('DENY');
@@ -237,7 +264,13 @@ describe('decision algebra', () => {
 
   it('merges approval requirements only in the more-demanding direction', () => {
     const merged = mergeApprovalRequirements([
-      { required: true, quorum: 1, roles: ['treasurer'], forbid_self_approval: false, ttl_seconds: 7200 },
+      {
+        required: true,
+        quorum: 1,
+        roles: ['treasurer'],
+        forbid_self_approval: false,
+        ttl_seconds: 7200,
+      },
       { required: true, quorum: 2, roles: ['cfo'], forbid_self_approval: true, ttl_seconds: 1800 },
     ]);
     expect(merged).toEqual({
@@ -251,7 +284,13 @@ describe('decision algebra', () => {
 
   it('raises quorum to cover every distinct required role', () => {
     const merged = mergeApprovalRequirements([
-      { required: true, quorum: 1, roles: ['treasurer', 'cfo'], forbid_self_approval: true, ttl_seconds: 3600 },
+      {
+        required: true,
+        quorum: 1,
+        roles: ['treasurer', 'cfo'],
+        forbid_self_approval: true,
+        ttl_seconds: 3600,
+      },
     ]);
     expect(merged?.quorum).toBe(2);
   });

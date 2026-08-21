@@ -1,0 +1,53 @@
+# Local development stack.
+#
+# Postgres only. The API and the dashboard run from source with reload, because
+# the inner loop matters more than parity with a container that would be
+# rebuilt on every change. `docker compose --profile full up` runs them in
+# containers when parity is what you need.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: scrutexity-postgres
+    environment:
+      POSTGRES_USER: scrutexity_owner
+      POSTGRES_PASSWORD: scrutexity
+      POSTGRES_DB: scrutexity
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U scrutexity_owner -d scrutexity']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    command:
+      # Verbose enough to see a slow authorization query without drowning in
+      # the ones that are fine.
+      - 'postgres'
+      - '-c'
+      - 'log_min_duration_statement=200'
+
+  api:
+    profiles: ['full']
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: '8080'
+      # The application connects as a NON-OWNER role, so row level security
+      # applies to it (ADR-0005).
+      DATABASE_URL: postgres://scrutexity_app:scrutexity@postgres:5432/scrutexity
+      DATABASE_ADMIN_URL: postgres://scrutexity_owner:scrutexity@postgres:5432/scrutexity
+      LOG_LEVEL: info
+    ports:
+      - '8080:8080'
+
+volumes:
+  postgres-data:

@@ -77,7 +77,10 @@ describe('receipts', () => {
       ...receipt!,
       payload: { decision: 'ALLOW', amount: { currency: 'USD', amountMinor: '99900000' }, seq: 1 },
     });
-    const result = verifyReceipt({ ...forged, signature: receipt!.signature, signing_key_id: 'test-key-1' }, verifier);
+    const result = verifyReceipt(
+      { ...forged, signature: receipt!.signature, signing_key_id: 'test-key-1' },
+      verifier,
+    );
     expect(result.intact).toBe(false);
     expect(result.checks.find((c) => c.check === 'SIGNATURE')?.passed).toBe(false);
   });

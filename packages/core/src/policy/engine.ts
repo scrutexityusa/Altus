@@ -150,7 +150,8 @@ function buildResolver(input: PolicyInput, consulted: Set<string>) {
         (s) =>
           s.signal_type === signalType &&
           s.subject_type === subjectRef &&
-          (subjectRef === 'organization' || (subjectId !== undefined && s.subject_id === subjectId)),
+          (subjectRef === 'organization' ||
+            (subjectId !== undefined && s.subject_id === subjectId)),
       );
       const chosen = selectSignal(candidates);
       if (!chosen) return undefined;

@@ -26,7 +26,12 @@ export function toErrorResponse(
     }));
     logger.info({ requestId, code: 'INVALID_REQUEST', details }, 'request rejected by schema');
     reply.code(400).send({
-      error: { code: 'INVALID_REQUEST', message: 'The request is invalid.', details, request_id: requestId },
+      error: {
+        code: 'INVALID_REQUEST',
+        message: 'The request is invalid.',
+        details,
+        request_id: requestId,
+      },
     });
     return;
   }
@@ -57,7 +62,10 @@ export function toErrorResponse(
     typeof framework.code === 'string' &&
     framework.code.startsWith('FST_')
   ) {
-    logger.info({ requestId, code: framework.code, status: framework.statusCode }, 'request rejected');
+    logger.info(
+      { requestId, code: framework.code, status: framework.statusCode },
+      'request rejected',
+    );
     reply.code(framework.statusCode).send({
       error: {
         code: framework.statusCode === 429 ? 'RATE_LIMITED' : 'INVALID_REQUEST',
@@ -86,6 +94,10 @@ export function toErrorResponse(
 
   logger.error({ requestId, err: error }, 'unhandled error');
   reply.code(500).send({
-    error: { code: 'INTERNAL_ERROR', message: 'An internal error occurred.', request_id: requestId },
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: 'An internal error occurred.',
+      request_id: requestId,
+    },
   });
 }

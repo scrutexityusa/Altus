@@ -15,7 +15,8 @@ import { buildApp } from '../services/api/src/app.js';
 import { seed, type SeedResult } from './seed.js';
 
 const ADMIN_URL =
-  process.env['DATABASE_ADMIN_URL'] ?? 'postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity';
+  process.env['DATABASE_ADMIN_URL'] ??
+  'postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity';
 const APP_URL =
   process.env['DATABASE_URL'] ?? 'postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity';
 
@@ -113,7 +114,10 @@ async function main(): Promise<void> {
       },
       ttl_seconds: 3600,
     });
-    expect(leaseResponse.status === 201, `lease issuance failed: ${JSON.stringify(leaseResponse.body)}`);
+    expect(
+      leaseResponse.status === 201,
+      `lease issuance failed: ${JSON.stringify(leaseResponse.body)}`,
+    );
     const lease = leaseResponse.body.authority_lease;
     step(`lease ${bold(lease.id)} issued to treasury-agent`);
     step('scope: wire.create, wire.submit, wire.execute over acct_001 and acct_002');
@@ -125,22 +129,35 @@ async function main(): Promise<void> {
       agent_id: 'treasury-agent',
       action: 'wire.execute',
       resource: { type: 'bank_account', id: 'acct_001' },
-      context: { amount: '25000.00', currency: 'USD', counterparty_id: 'cp_100', destination_country: 'US' },
+      context: {
+        amount: '25000.00',
+        currency: 'USD',
+        counterparty_id: 'cp_100',
+        destination_country: 'US',
+      },
       nonce: `demo-small-${Date.now()}`,
     });
     expect(
       small.body.decision === 'ALLOW',
       `expected ALLOW, got ${small.body.decision} (${small.body.reason_code})`,
     );
-    outcome(small.body.decision, `${small.body.reason_code} -- grant valid until ${small.body.expires_at}`);
-    step(`policy ${small.body.policy_id} v${small.body.policy_version} (${small.body.policy_hash.slice(0, 12)})`);
+    outcome(
+      small.body.decision,
+      `${small.body.reason_code} -- grant valid until ${small.body.expires_at}`,
+    );
+    step(
+      `policy ${small.body.policy_id} v${small.body.policy_version} (${small.body.policy_hash.slice(0, 12)})`,
+    );
 
     const execution = await call('POST', '/v1/executions', t['treasury_agent']!, {
       decision_id: small.body.decision_id,
       status: 'SUCCEEDED',
       result: { wire_reference: 'WIRE-2026-0001' },
     });
-    expect(execution.status === 201, `execution recording failed: ${JSON.stringify(execution.body)}`);
+    expect(
+      execution.status === 201,
+      `execution recording failed: ${JSON.stringify(execution.body)}`,
+    );
     step(`executed; receipt ${execution.body.receipt_id}`);
 
     step('replaying the same execution grant...');
@@ -149,7 +166,10 @@ async function main(): Promise<void> {
       status: 'SUCCEEDED',
       result: { wire_reference: 'WIRE-2026-0001' },
     });
-    expect(replay.body.error?.code === 'REPLAY_DETECTED', 'a reused execution grant must be refused');
+    expect(
+      replay.body.error?.code === 'REPLAY_DETECTED',
+      'a reused execution grant must be refused',
+    );
     outcome('DENY', `${replay.body.error.code} -- an ALLOW is a single-use grant`);
 
     scene('A $250,000 wire -- beyond the agent discretion');
@@ -157,7 +177,12 @@ async function main(): Promise<void> {
       agent_id: 'treasury-agent',
       action: 'wire.execute',
       resource: { type: 'bank_account', id: 'acct_001' },
-      context: { amount: '250000.00', currency: 'USD', counterparty_id: 'cp_101', destination_country: 'CH' },
+      context: {
+        amount: '250000.00',
+        currency: 'USD',
+        counterparty_id: 'cp_101',
+        destination_country: 'CH',
+      },
       nonce: `demo-large-${Date.now()}`,
     });
     expect(large.body.decision === 'ESCALATE', `expected ESCALATE, got ${large.body.decision}`);
@@ -179,7 +204,9 @@ async function main(): Promise<void> {
     expect(approval.status === 201, `approval failed: ${JSON.stringify(approval.body)}`);
     expect(approval.body.decision.decision === 'ALLOW', 'approval should have produced an ALLOW');
     outcome(approval.body.decision.decision, `${approval.body.decision.reason_code}`);
-    step(`approved as ${bold(approval.body.satisfied_role)}; new decision ${approval.body.decision.decision_id}`);
+    step(
+      `approved as ${bold(approval.body.satisfied_role)}; new decision ${approval.body.decision.decision_id}`,
+    );
     step('the escalated decision is superseded, never rewritten');
 
     step('the CFO attempts to approve the same request...');
@@ -210,7 +237,9 @@ async function main(): Promise<void> {
       ttl_seconds: 600,
     });
     expect(delegation.status === 201, `delegation failed: ${JSON.stringify(delegation.body)}`);
-    step(`delegation ${bold(delegation.body.delegation_id)} at depth ${delegation.body.child_lease.depth}`);
+    step(
+      `delegation ${bold(delegation.body.delegation_id)} at depth ${delegation.body.child_lease.depth}`,
+    );
     step('verification-agent may read cp_100 and cp_101, and nothing else');
 
     step('treasury-agent attempts to delegate wire.execute as well...');
@@ -239,14 +268,22 @@ async function main(): Promise<void> {
       resource: { type: 'counterparty', id: 'cp_100' },
       context: { counterparty_id: 'cp_100' },
     });
-    expect(readOk.body.decision === 'ALLOW', `the delegated read should be allowed: ${readOk.body.reason_code}`);
+    expect(
+      readOk.body.decision === 'ALLOW',
+      `the delegated read should be allowed: ${readOk.body.reason_code}`,
+    );
     outcome(readOk.body.decision, `counterparty.read on cp_100 -- ${readOk.body.reason_code}`);
 
     const violation = await call('POST', '/v1/authorization/evaluate', t['verification_agent']!, {
       agent_id: 'verification-agent',
       action: 'wire.modify',
       resource: { type: 'bank_account', id: 'acct_001' },
-      context: { amount: '5000.00', currency: 'USD', counterparty_id: 'cp_100', wire_id: 'wire_991' },
+      context: {
+        amount: '5000.00',
+        currency: 'USD',
+        counterparty_id: 'cp_100',
+        wire_id: 'wire_991',
+      },
     });
     expect(violation.body.decision === 'DENY', `expected DENY, got ${violation.body.decision}`);
     outcome(violation.body.decision, `${violation.body.reason_code}`);
@@ -271,18 +308,31 @@ async function main(): Promise<void> {
       ttl_seconds: 600,
     });
     expect(signal.status === 201, `signal ingestion failed: ${JSON.stringify(signal.body)}`);
-    step(`fraud_risk = ${red('0.97')} for treasury-agent, valid until ${signal.body.signal.expires_at}`);
+    step(
+      `fraud_risk = ${red('0.97')} for treasury-agent, valid until ${signal.body.signal.expires_at}`,
+    );
 
     const decayed = await call('POST', '/v1/authorization/evaluate', t['treasury_agent']!, {
       agent_id: 'treasury-agent',
       action: 'wire.execute',
       resource: { type: 'bank_account', id: 'acct_001' },
-      context: { amount: '25000.00', currency: 'USD', counterparty_id: 'cp_100', destination_country: 'US' },
+      context: {
+        amount: '25000.00',
+        currency: 'USD',
+        counterparty_id: 'cp_100',
+        destination_country: 'US',
+      },
       nonce: `demo-decayed-${Date.now()}`,
     });
-    expect(decayed.body.decision === 'ESCALATE', `expected ESCALATE after decay, got ${decayed.body.decision}`);
+    expect(
+      decayed.body.decision === 'ESCALATE',
+      `expected ESCALATE after decay, got ${decayed.body.decision}`,
+    );
     step('the same $25,000 wire that ran unattended a moment ago:');
-    outcome(decayed.body.decision, `${decayed.body.reason_code} -- authority narrowed, role unchanged`);
+    outcome(
+      decayed.body.decision,
+      `${decayed.body.reason_code} -- authority narrowed, role unchanged`,
+    );
 
     scene('Revocation is immediate');
     const revoked = await call('POST', `/v1/authority-leases/${lease.id}/revoke`, t['admin']!, {
@@ -295,28 +345,49 @@ async function main(): Promise<void> {
       agent_id: 'treasury-agent',
       action: 'wire.execute',
       resource: { type: 'bank_account', id: 'acct_001' },
-      context: { amount: '100.00', currency: 'USD', counterparty_id: 'cp_100', destination_country: 'US' },
+      context: {
+        amount: '100.00',
+        currency: 'USD',
+        counterparty_id: 'cp_100',
+        destination_country: 'US',
+      },
     });
     expect(
       afterRevocation.body.reason_code === 'AUTHORITY_REVOKED',
       `a revoked lease must not authorize, got ${afterRevocation.body.reason_code}`,
     );
-    outcome(afterRevocation.body.decision, `${afterRevocation.body.reason_code} -- no grace period`);
+    outcome(
+      afterRevocation.body.decision,
+      `${afterRevocation.body.reason_code} -- no grace period`,
+    );
 
-    const childAfterRevocation = await call('POST', '/v1/authorization/evaluate', t['verification_agent']!, {
-      agent_id: 'verification-agent',
-      action: 'counterparty.read',
-      resource: { type: 'counterparty', id: 'cp_100' },
-      context: { counterparty_id: 'cp_100' },
-    });
-    expect(childAfterRevocation.body.decision === 'DENY', 'revoking a parent must kill its children');
+    const childAfterRevocation = await call(
+      'POST',
+      '/v1/authorization/evaluate',
+      t['verification_agent']!,
+      {
+        agent_id: 'verification-agent',
+        action: 'counterparty.read',
+        resource: { type: 'counterparty', id: 'cp_100' },
+        context: { counterparty_id: 'cp_100' },
+      },
+    );
+    expect(
+      childAfterRevocation.body.decision === 'DENY',
+      'revoking a parent must kill its children',
+    );
     outcome(
       childAfterRevocation.body.decision,
       `${childAfterRevocation.body.reason_code} -- the delegated lease died with its parent`,
     );
 
     scene('Evidence');
-    const verification = await call('POST', `/v1/receipts/${small.body.receipt_id}/verify`, t['admin']!, {});
+    const verification = await call(
+      'POST',
+      `/v1/receipts/${small.body.receipt_id}/verify`,
+      t['admin']!,
+      {},
+    );
     expect(verification.body.integrity === 'INTACT', 'receipt verification failed');
     step(`receipt ${small.body.receipt_id}: ${green(verification.body.integrity)}`);
     for (const check of verification.body.receipt_verification.checks) {
@@ -336,7 +407,9 @@ async function main(): Promise<void> {
     expect(tampered.body.integrity === 'COMPROMISED', 'a modified receipt must not verify');
     outcome('DENY', `tampered receipt: ${red(tampered.body.integrity)}`);
 
-    process.stdout.write(`\n${green(bold('  Demo complete -- every scene behaved as specified.'))}\n\n`);
+    process.stdout.write(
+      `\n${green(bold('  Demo complete -- every scene behaved as specified.'))}\n\n`,
+    );
   } finally {
     await app.close();
   }

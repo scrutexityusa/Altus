@@ -131,7 +131,9 @@ export function explainDecision(
   }
 
   // -- WHAT SIGNALS INFLUENCED THE DECISION ---------------------------------
-  const consulted = outcome.signals_considered.filter((s) => evaluation.risk_signal_ids.includes(s.id));
+  const consulted = outcome.signals_considered.filter((s) =>
+    evaluation.risk_signal_ids.includes(s.id),
+  );
   const signals =
     consulted.length === 0
       ? 'No risk signal was read by any matched rule.'
@@ -213,11 +215,13 @@ function buildWhy(
     case 'AUTHORITY_MISSING':
       return `${agent} holds no authority covering "${evaluation.action}" on this resource. Execution blocked.`;
     case 'ACTION_NOT_IN_AUTHORITY': {
-      const detail = blocked?.kind === 'ENVELOPE' ? ` ${blocked.detail}.` : '';
+      // The envelope detail restates this sentence, so it is not appended.
+      // What adds information is *which* authority fell short, and who granted
+      // it -- that is the fact an operator needs to act on.
       const via = labels.delegated_by_handle
-        ? ` The authority ${agent} holds was delegated by ${labels.delegated_by_handle} and does not include this action.`
+        ? ` That authority was delegated by ${labels.delegated_by_handle} and does not extend to financial actions.`
         : '';
-      return `Action "${evaluation.action}" is not present in the authority held by ${agent}.${detail}${via} Execution blocked.`;
+      return `Action "${evaluation.action}" is not present in the authority held by ${agent}.${via} Execution blocked.`;
     }
     case 'RESOURCE_NOT_IN_AUTHORITY':
       return `The resource ${evaluation.resource.type}:${evaluation.resource.id} lies outside the authority held by ${agent}. Execution blocked.`;
@@ -233,7 +237,8 @@ function buildWhy(
       return `A live risk signal triggered ${rules ? `policy rule ${rules}` : 'a policy rule'}, which narrowed the authority ${agent} may exercise without a human.${detail} The action remains within the agent's role, so it was escalated rather than blocked.`;
     }
     case 'CONSTRAINT_VIOLATION': {
-      const detail = blocked?.kind === 'CONSTRAINT' || blocked?.kind === 'DECAY' ? ` ${blocked.detail}.` : '';
+      const detail =
+        blocked?.kind === 'CONSTRAINT' || blocked?.kind === 'DECAY' ? ` ${blocked.detail}.` : '';
       return evaluation.decision === 'ESCALATE'
         ? `The request exceeds what ${agent} may do unsupervised.${detail} A human with sufficient authority must approve it.`
         : `The request falls outside the constraints of the authority held by ${agent}.${detail} No approval path is defined for this case, so it was denied.`;
@@ -260,7 +265,14 @@ function buildWhy(
     return `Policy permitted the action and the authority held by ${agent} covers it in full. Execution authorised until ${evaluation.expires_at}.`;
   }
   if (evaluation.decision === 'ESCALATE') {
-    return 'Policy requires a human decision before this action may proceed.';
+    // A policy-named reason code (TREASURER_APPROVAL_REQUIRED and the like)
+    // says who must decide but not what triggered it. When the autonomy check
+    // is what failed, name it: "the ceiling was exceeded" is the fact an
+    // operator needs, and it is already in the structured record.
+    if (blocked?.kind === 'CONSTRAINT' || blocked?.kind === 'DECAY') {
+      return `The request exceeds what ${agent} may do unsupervised. ${blocked.detail}. A human with sufficient authority must approve it before it may proceed.`;
+    }
+    return `Policy requires a human decision before this action may proceed (${evaluation.reason_code}).`;
   }
   return `Policy denied the action (${evaluation.reason_code}). Execution blocked.`;
 }

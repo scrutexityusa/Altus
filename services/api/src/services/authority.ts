@@ -173,7 +173,10 @@ export async function createDelegation(
   if (delegate.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'delegate agent not found');
   const delegateAgent = delegate.rows[0] as { id: string; status: string; handle: string };
   if (delegateAgent.status !== 'ACTIVE') {
-    throw new ScrutexityError('STATE_CONFLICT', 'authority cannot be delegated to a non-active agent');
+    throw new ScrutexityError(
+      'STATE_CONFLICT',
+      'authority cannot be delegated to a non-active agent',
+    );
   }
 
   // Lock the parent for the duration: a concurrent revocation must not slip
@@ -194,9 +197,7 @@ export async function createDelegation(
      ) SELECT * FROM chain`,
     [input.parentLeaseId],
   );
-  const chain = (chainResult.rows as LeaseRow[])
-    .sort((a, b) => b.depth - a.depth)
-    .map(toLease);
+  const chain = (chainResult.rows as LeaseRow[]).sort((a, b) => b.depth - a.depth).map(toLease);
 
   const policyVersion = await activePolicyVersion(client, input.organizationId);
   const { document } = loadPolicyDocument(policyVersion.content);
@@ -307,10 +308,12 @@ async function activePolicyVersion(client: PoolClient, organizationId: string) {
     [organizationId],
   );
   const row = result.rows[0] as
-    | { id: string; policy_id: string; content: unknown; content_hash: string }
-    | undefined;
+    { id: string; policy_id: string; content: unknown; content_hash: string } | undefined;
   if (!row) {
-    throw new ScrutexityError('POLICY_UNAVAILABLE', 'the organization has no active policy version');
+    throw new ScrutexityError(
+      'POLICY_UNAVAILABLE',
+      'the organization has no active policy version',
+    );
   }
   return row;
 }

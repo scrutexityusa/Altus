@@ -1,4 +1,10 @@
-import { createPrivateKey, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from 'node:crypto';
+import {
+  createPrivateKey,
+  createPublicKey,
+  sign as edSign,
+  verify as edVerify,
+  type KeyObject,
+} from 'node:crypto';
 import { GENESIS_HASH, canonicalize, hashObject, sha256Hex } from './canonical.js';
 
 /**
@@ -211,7 +217,9 @@ export function verifyChain(
       result.checks.push({
         check: 'SEQUENCE',
         passed: sequential,
-        detail: sequential ? 'sequence is contiguous' : `sequence jumped ${previous.seq} -> ${receipt.seq}`,
+        detail: sequential
+          ? 'sequence is contiguous'
+          : `sequence jumped ${previous.seq} -> ${receipt.seq}`,
       });
       result.intact = result.checks.every((c) => c.passed);
     } else if (receipt.seq === 1) {
@@ -247,25 +255,38 @@ export function verifyChain(
 // Ed25519 signing
 // ---------------------------------------------------------------------------
 
-export function ed25519Signer(privateKeyPem: string | Buffer | KeyObject, keyId: string): ReceiptSigner {
-  const key = privateKeyPem instanceof Object && 'asymmetricKeyType' in privateKeyPem
-    ? (privateKeyPem as KeyObject)
-    : createPrivateKey(privateKeyPem as string | Buffer);
+export function ed25519Signer(
+  privateKeyPem: string | Buffer | KeyObject,
+  keyId: string,
+): ReceiptSigner {
+  const key =
+    privateKeyPem instanceof Object && 'asymmetricKeyType' in privateKeyPem
+      ? (privateKeyPem as KeyObject)
+      : createPrivateKey(privateKeyPem as string | Buffer);
   return {
     keyId,
     sign: (hashHex) => edSign(null, Buffer.from(hashHex, 'utf8'), key).toString('base64url'),
   };
 }
 
-export function ed25519Verifier(publicKeyPem: string | Buffer | KeyObject, keyId: string): ReceiptVerifier {
-  const key = publicKeyPem instanceof Object && 'asymmetricKeyType' in publicKeyPem
-    ? (publicKeyPem as KeyObject)
-    : createPublicKey(publicKeyPem as string | Buffer);
+export function ed25519Verifier(
+  publicKeyPem: string | Buffer | KeyObject,
+  keyId: string,
+): ReceiptVerifier {
+  const key =
+    publicKeyPem instanceof Object && 'asymmetricKeyType' in publicKeyPem
+      ? (publicKeyPem as KeyObject)
+      : createPublicKey(publicKeyPem as string | Buffer);
   return {
     keyId,
     verify: (hashHex, signature) => {
       try {
-        return edVerify(null, Buffer.from(hashHex, 'utf8'), key, Buffer.from(signature, 'base64url'));
+        return edVerify(
+          null,
+          Buffer.from(hashHex, 'utf8'),
+          key,
+          Buffer.from(signature, 'base64url'),
+        );
       } catch {
         return false;
       }

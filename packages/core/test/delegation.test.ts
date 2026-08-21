@@ -74,7 +74,11 @@ describe('delegation', () => {
   it('refuses authority the parent never held', () => {
     const result = authorizeDelegation(
       proposal({
-        requested_grant: { ...narrowGrant, actions: ['ledger.close'], resources: { ledger: ['led_1'] } },
+        requested_grant: {
+          ...narrowGrant,
+          actions: ['ledger.close'],
+          resources: { ledger: ['led_1'] },
+        },
       }),
       context(),
     );
@@ -102,7 +106,10 @@ describe('delegation', () => {
   });
 
   it('refuses self-delegation', () => {
-    const result = authorizeDelegation(proposal({ delegate_agent_id: 'agent_treasury' }), context());
+    const result = authorizeDelegation(
+      proposal({ delegate_agent_id: 'agent_treasury' }),
+      context(),
+    );
     expect(result.ok).toBe(false);
   });
 
@@ -143,10 +150,22 @@ describe('delegation', () => {
   });
 
   it('stops at the policy depth limit', () => {
-    const deep = lease({ id: 'lease_deep', agent_id: 'agent_treasury', depth: 2, parent_lease_id: 'lease_mid' });
+    const deep = lease({
+      id: 'lease_deep',
+      agent_id: 'agent_treasury',
+      depth: 2,
+      parent_lease_id: 'lease_mid',
+    });
     const result = authorizeDelegation(
       proposal(),
-      context({ parent_lease: deep, parent_chain: [deep, lease({ id: 'lease_mid', depth: 1, parent_lease_id: 'lease_root' }), lease()] }),
+      context({
+        parent_lease: deep,
+        parent_chain: [
+          deep,
+          lease({ id: 'lease_mid', depth: 1, parent_lease_id: 'lease_root' }),
+          lease(),
+        ],
+      }),
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -163,7 +182,10 @@ describe('delegation', () => {
     // -- but a parent already expired must not.
     expect(result.ok).toBe(true);
     const expired = lease({ expires_at: T0.toISOString() });
-    expect(authorizeDelegation(proposal(), context({ parent_lease: expired, parent_chain: [expired] })).ok).toBe(false);
+    expect(
+      authorizeDelegation(proposal(), context({ parent_lease: expired, parent_chain: [expired] }))
+        .ok,
+    ).toBe(false);
   });
 });
 
@@ -179,17 +201,26 @@ describe('adversarial delegation inputs', () => {
     },
     {
       name: 'raised amount ceiling',
-      grant: { ...narrowGrant, constraints: { ...narrowGrant.constraints, max_amount: parseMoney('999999', 'USD') } },
+      grant: {
+        ...narrowGrant,
+        constraints: { ...narrowGrant.constraints, max_amount: parseMoney('999999', 'USD') },
+      },
     },
     {
       name: 'ceiling swapped to another currency',
-      grant: { ...narrowGrant, constraints: { ...narrowGrant.constraints, max_amount: parseMoney('1', 'JPY') } },
+      grant: {
+        ...narrowGrant,
+        constraints: { ...narrowGrant.constraints, max_amount: parseMoney('1', 'JPY') },
+      },
     },
     {
       name: 'counterparty allowlist widened',
       grant: {
         ...narrowGrant,
-        constraints: { ...narrowGrant.constraints, allowed_counterparties: ['cp_100', 'cp_attacker'] },
+        constraints: {
+          ...narrowGrant.constraints,
+          allowed_counterparties: ['cp_100', 'cp_attacker'],
+        },
       },
     },
     {
@@ -201,7 +232,10 @@ describe('adversarial delegation inputs', () => {
     },
     {
       name: 'currency allowlist widened',
-      grant: { ...narrowGrant, constraints: { ...narrowGrant.constraints, currencies: ['USD', 'EUR'] } },
+      grant: {
+        ...narrowGrant,
+        constraints: { ...narrowGrant.constraints, currencies: ['USD', 'EUR'] },
+      },
     },
     {
       name: 'resource type the parent has no authority over',

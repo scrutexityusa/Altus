@@ -1,0 +1,136 @@
+# The control plane, deployed as a standalone service.
+#
+# For the sidecar deployment model, see sidecar-patch.yaml: the same image and
+# the same configuration, injected next to the workload it protects so the
+# enforcement point sits as close to the action as practical.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+  labels:
+    app.kubernetes.io/name: scrutexity-api
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scrutexity-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      # Never below full capacity during a roll. An authorization service that
+      # briefly cannot answer causes callers to fail closed, which for treasury
+      # actions means real payments stop.
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scrutexity-api
+        app.kubernetes.io/component: control-plane
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/port: '8080'
+        prometheus.io/path: '/metrics'
+    spec:
+      serviceAccountName: scrutexity-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: scrutexity-api
+      containers:
+        - name: api
+          image: ghcr.io/scrutexityusa/scrutexity-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: scrutexity-config
+            - secretRef:
+                name: scrutexity-secrets
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Liveness deliberately does not touch the database: restarting a
+          # healthy process because Postgres blipped turns a brief dependency
+          # failure into an outage.
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness does check the database, so a pod that cannot decide is
+          # taken out of rotation without being killed.
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: '250m'
+              memory: '256Mi'
+            limits:
+              # No CPU limit: throttling an authorization service adds latency
+              # to the one call path that must not have any, and the request
+              # already guarantees the floor.
+              memory: '512Mi'
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+spec:
+  selector:
+    app.kubernetes.io/name: scrutexity-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scrutexity-api

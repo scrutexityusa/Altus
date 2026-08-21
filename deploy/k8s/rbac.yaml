@@ -1,0 +1,33 @@
+# The service account the control plane runs as.
+#
+# It needs no Kubernetes API access whatsoever: it talks to Postgres and
+# nothing else. The Role below is intentionally empty of resources, and the
+# token is not mounted. If a future component needs cluster access, add it here
+# explicitly rather than widening this.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scrutexity-api
+  namespace: scrutexity
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scrutexity-api
+subjects:
+  - kind: ServiceAccount
+    name: scrutexity-api
+    namespace: scrutexity

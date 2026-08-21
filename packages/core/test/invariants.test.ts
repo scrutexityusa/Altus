@@ -38,7 +38,14 @@ function rng(seed: number) {
   };
 }
 
-const ACTIONS = ['wire.create', 'wire.submit', 'wire.execute', 'wire.modify', 'counterparty.read', 'account.read'];
+const ACTIONS = [
+  'wire.create',
+  'wire.submit',
+  'wire.execute',
+  'wire.modify',
+  'counterparty.read',
+  'account.read',
+];
 const WILDCARDS = ['wire.*', '*', 'counterparty.*'];
 const ACCOUNTS = ['acct_001', 'acct_002', 'acct_003', '*'];
 const COUNTERPARTIES = ['cp_100', 'cp_101', 'cp_102', '*'];
@@ -65,7 +72,8 @@ function randomGrant(random: () => number): AuthorityGrant {
   }
   if (random() < 0.7) constraints.currencies = pickSome(random, CURRENCIES, 1);
   if (random() < 0.7) constraints.allowed_counterparties = pickSome(random, COUNTERPARTIES, 1);
-  if (random() < 0.3) constraints.denied_counterparties = pickSome(random, COUNTERPARTIES.slice(0, 3), 1);
+  if (random() < 0.3)
+    constraints.denied_counterparties = pickSome(random, COUNTERPARTIES.slice(0, 3), 1);
   return { actions, resources, constraints };
 }
 
@@ -98,9 +106,10 @@ function derivedGrant(random: () => number, parent: AuthorityGrant): AuthorityGr
   const mutation = random();
   if (mutation < 0.08) child.actions = [...child.actions, 'ledger.close'];
   else if (mutation < 0.16) child.resources = { ...child.resources, ledger: ['*'] };
-  else if (mutation < 0.24) child.constraints = { ...constraints, max_amount: parseMoney('1000000', 'USD') };
+  else if (mutation < 0.24)
+    child.constraints = { ...constraints, max_amount: parseMoney('1000000', 'USD') };
   else if (mutation < 0.32) delete child.constraints.max_amount;
-  else if (mutation < 0.40) child.constraints = { ...constraints, allowed_counterparties: ['*'] };
+  else if (mutation < 0.4) child.constraints = { ...constraints, allowed_counterparties: ['*'] };
   else if (mutation < 0.46) child.actions = ['*'];
   return child;
 }
@@ -125,7 +134,10 @@ describe('invariant: child authority never exceeds parent authority', () => {
       if (result.ok) {
         authorized++;
         const containment = containsGrant(parentGrant, result.child_grant);
-        expect(containment.contained, `iteration ${i}: ${JSON.stringify({ parentGrant, requested })}`).toBe(true);
+        expect(
+          containment.contained,
+          `iteration ${i}: ${JSON.stringify({ parentGrant, requested })}`,
+        ).toBe(true);
       }
     }
     // The generator must actually exercise the success path.
@@ -168,7 +180,10 @@ describe('invariant: decay only ever shrinks authority', () => {
         remove_actions: pickSome(random, [...ACTIONS, ...WILDCARDS]),
         tighten: randomGrant(random).constraints,
       });
-      expect(containsGrant(base, decayed).contained, `iteration ${i}: ${JSON.stringify(base)}`).toBe(true);
+      expect(
+        containsGrant(base, decayed).contained,
+        `iteration ${i}: ${JSON.stringify(base)}`,
+      ).toBe(true);
     }
   });
 });
@@ -232,7 +247,9 @@ describe('invariant: an ALLOW is never issued without covering authority', () =>
         const finding = result.evaluation.authority_findings.find(
           (f) => f.lease_id === result.authority_lease_id,
         );
-        expect(finding?.autonomous, `iteration ${i}: allowed without autonomous authority`).toBe(true);
+        expect(finding?.autonomous, `iteration ${i}: allowed without autonomous authority`).toBe(
+          true,
+        );
         expect(finding?.chain.usable).toBe(true);
       }
     }

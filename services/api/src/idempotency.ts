@@ -45,7 +45,12 @@ export async function claimIdempotencyKey(
     [organizationId, endpoint, key],
   );
   const row = existing.rows[0] as
-    | { request_hash: string; status_code: number | null; response_body: unknown; completed_at: Date | null }
+    | {
+        request_hash: string;
+        status_code: number | null;
+        response_body: unknown;
+        completed_at: Date | null;
+      }
     | undefined;
   if (!row) return null;
 
@@ -58,7 +63,10 @@ export async function claimIdempotencyKey(
   if (row.completed_at === null) {
     // The original attempt is still running or died mid-flight. Refusing is
     // safer than racing it: the caller may retry.
-    throw new ScrutexityError('STATE_CONFLICT', 'a request with this idempotency key is still in progress');
+    throw new ScrutexityError(
+      'STATE_CONFLICT',
+      'a request with this idempotency key is still in progress',
+    );
   }
   return { status_code: row.status_code ?? 200, body: row.response_body };
 }

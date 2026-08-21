@@ -11,7 +11,8 @@ import { seed, type SeedResult } from '../../../scripts/seed.js';
  */
 
 export const ADMIN_URL =
-  process.env['DATABASE_ADMIN_URL'] ?? 'postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity';
+  process.env['DATABASE_ADMIN_URL'] ??
+  'postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity';
 export const APP_URL =
   process.env['DATABASE_URL'] ?? 'postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity';
 

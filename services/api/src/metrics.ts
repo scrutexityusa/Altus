@@ -11,7 +11,10 @@ type Labels = Record<string, string>;
 interface Series {
   help: string;
   type: 'counter' | 'histogram';
-  values: Map<string, { labels: Labels; value: number; buckets?: number[]; sum?: number; count?: number }>;
+  values: Map<
+    string,
+    { labels: Labels; value: number; buckets?: number[]; sum?: number; count?: number }
+  >;
   buckets?: number[];
 }
 
@@ -49,7 +52,13 @@ export function histogram(name: string, help: string, buckets = LATENCY_BUCKETS)
       const id = key(labels);
       let entry = series.values.get(id);
       if (!entry) {
-        entry = { labels, value: 0, buckets: new Array(buckets.length + 1).fill(0), sum: 0, count: 0 };
+        entry = {
+          labels,
+          value: 0,
+          buckets: new Array(buckets.length + 1).fill(0),
+          sum: 0,
+          count: 0,
+        };
         series.values.set(id, entry);
       }
       entry.sum! += value;
@@ -74,7 +83,9 @@ export function renderMetrics(): string {
       let cumulative = 0;
       for (const [index, bucket] of series.buckets!.entries()) {
         cumulative += entry.buckets![index]!;
-        lines.push(`${name}_bucket{${labelText}${labelText ? ',' : ''}le="${bucket}"} ${cumulative}`);
+        lines.push(
+          `${name}_bucket{${labelText}${labelText ? ',' : ''}le="${bucket}"} ${cumulative}`,
+        );
       }
       cumulative += entry.buckets![series.buckets!.length]!;
       lines.push(
@@ -111,17 +122,29 @@ export const metrics = {
   policyCache: counter('scrutexity_policy_cache_total', 'Policy version cache hits and misses'),
   leasesIssued: counter('scrutexity_leases_issued_total', 'Authority leases issued by depth'),
   leasesRevoked: counter('scrutexity_leases_revoked_total', 'Authority leases revoked'),
-  leasesExpired: counter('scrutexity_leases_expired_total', 'Authority leases observed expired at evaluation'),
+  leasesExpired: counter(
+    'scrutexity_leases_expired_total',
+    'Authority leases observed expired at evaluation',
+  ),
   delegationsCreated: counter('scrutexity_delegations_created_total', 'Delegations created'),
-  delegationsRejected: counter('scrutexity_delegations_rejected_total', 'Delegations rejected by reason'),
+  delegationsRejected: counter(
+    'scrutexity_delegations_rejected_total',
+    'Delegations rejected by reason',
+  ),
   signalsIngested: counter('scrutexity_signals_ingested_total', 'Risk signals ingested by type'),
-  approvalsRecorded: counter('scrutexity_approvals_recorded_total', 'Human approvals recorded by vote'),
+  approvalsRecorded: counter(
+    'scrutexity_approvals_recorded_total',
+    'Human approvals recorded by vote',
+  ),
   approvalLatency: histogram(
     'scrutexity_approval_latency_seconds',
     'Time from escalation to satisfied approval',
     [1, 5, 15, 60, 300, 900, 3600, 14_400],
   ),
-  receiptsAppended: counter('scrutexity_receipts_appended_total', 'Evidence receipts appended by kind'),
+  receiptsAppended: counter(
+    'scrutexity_receipts_appended_total',
+    'Evidence receipts appended by kind',
+  ),
   verificationFailures: counter(
     'scrutexity_verification_failures_total',
     'Receipt verification failures by check',

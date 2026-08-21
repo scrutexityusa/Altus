@@ -1,10 +1,5 @@
 import { z } from 'zod';
-import {
-  MoneySchema,
-  compareMoney,
-  formatMoneyWithCurrency,
-  type Money,
-} from '../money.js';
+import { MoneySchema, compareMoney, formatMoneyWithCurrency, type Money } from '../money.js';
 
 /**
  * ============================================================================
@@ -419,7 +414,14 @@ export function coversAttempt(grant: AuthorityGrant, attempt: AttemptDescriptor)
       }
     }
 
-    checks.push({ constraint: name, satisfied, applicable: true, limit, observed: observed ?? null, message });
+    checks.push({
+      constraint: name,
+      satisfied,
+      applicable: true,
+      limit,
+      observed: observed ?? null,
+      message,
+    });
     if (!satisfied && !constraintFailure) {
       constraintFailure = { kind: 'CONSTRAINT_VIOLATION', constraint: name, detail: message };
     }
@@ -465,7 +467,10 @@ export interface GrantRestriction {
  * by the input. Decay can only ever shrink authority -- there is deliberately
  * no operation in this module that widens one.
  */
-export function restrictGrant(grant: AuthorityGrant, restriction: GrantRestriction): AuthorityGrant {
+export function restrictGrant(
+  grant: AuthorityGrant,
+  restriction: GrantRestriction,
+): AuthorityGrant {
   const removals = restriction.remove_actions ?? [];
   const actions = grant.actions.filter(
     (granted) =>

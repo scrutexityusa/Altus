@@ -48,9 +48,15 @@ describe('containment: child ⊆ parent', () => {
 
   it('rejects a wildcard that widens a parent wildcard', () => {
     const wide: AuthorityGrant = { actions: ['wire.*'], resources: {}, constraints: {} };
-    expect(containsGrant(wide, { actions: ['wire.batch.*'], resources: {}, constraints: {} }).contained).toBe(true);
-    expect(containsGrant(wide, { actions: ['*'], resources: {}, constraints: {} }).contained).toBe(false);
-    expect(containsGrant(wide, { actions: ['ledger.*'], resources: {}, constraints: {} }).contained).toBe(false);
+    expect(
+      containsGrant(wide, { actions: ['wire.batch.*'], resources: {}, constraints: {} }).contained,
+    ).toBe(true);
+    expect(containsGrant(wide, { actions: ['*'], resources: {}, constraints: {} }).contained).toBe(
+      false,
+    );
+    expect(
+      containsGrant(wide, { actions: ['ledger.*'], resources: {}, constraints: {} }).contained,
+    ).toBe(false);
   });
 
   it('rejects a resource type the parent holds no authority over', () => {
@@ -65,7 +71,9 @@ describe('containment: child ⊆ parent', () => {
   });
 
   it('allows a wildcard claim where the parent itself holds a wildcard', () => {
-    expect(containsGrant(parent, child({ resources: { counterparty: ['*'] } })).contained).toBe(true);
+    expect(containsGrant(parent, child({ resources: { counterparty: ['*'] } })).contained).toBe(
+      true,
+    );
   });
 
   // The attack this whole module exists to stop: widening by omission.
@@ -86,7 +94,9 @@ describe('containment: child ⊆ parent', () => {
   it('rejects a higher ceiling', () => {
     const result = containsGrant(
       parent,
-      child({ constraints: { ...child({}).constraints, max_amount: parseMoney('50000.01', 'USD') } }),
+      child({
+        constraints: { ...child({}).constraints, max_amount: parseMoney('50000.01', 'USD') },
+      }),
     );
     expect(result.contained).toBe(false);
   });
@@ -95,7 +105,9 @@ describe('containment: child ⊆ parent', () => {
     expect(
       containsGrant(
         parent,
-        child({ constraints: { ...child({}).constraints, max_amount: parseMoney('50000', 'USD') } }),
+        child({
+          constraints: { ...child({}).constraints, max_amount: parseMoney('50000', 'USD') },
+        }),
       ).contained,
     ).toBe(true);
   });
@@ -117,7 +129,12 @@ describe('containment: child ⊆ parent', () => {
     expect(withoutDeny.contained).toBe(false);
     const withDeny = containsGrant(
       denyingParent,
-      child({ constraints: { ...child({}).constraints, denied_counterparties: ['cp_sanctioned', 'cp_extra'] } }),
+      child({
+        constraints: {
+          ...child({}).constraints,
+          denied_counterparties: ['cp_sanctioned', 'cp_extra'],
+        },
+      }),
     );
     expect(withDeny.contained).toBe(true);
   });
@@ -127,8 +144,12 @@ describe('containment: child ⊆ parent', () => {
   });
 
   it('is transitive over a delegation chain', () => {
-    const mid = child({ constraints: { ...child({}).constraints, max_amount: parseMoney('5000', 'USD') } });
-    const leaf = child({ constraints: { ...child({}).constraints, max_amount: parseMoney('100', 'USD') } });
+    const mid = child({
+      constraints: { ...child({}).constraints, max_amount: parseMoney('5000', 'USD') },
+    });
+    const leaf = child({
+      constraints: { ...child({}).constraints, max_amount: parseMoney('100', 'USD') },
+    });
     expect(containsGrant(parent, mid).contained).toBe(true);
     expect(containsGrant(mid, leaf).contained).toBe(true);
     expect(containsGrant(parent, leaf).contained).toBe(true);
@@ -155,7 +176,13 @@ describe('coverage of a concrete attempt', () => {
   it('reports the amount ceiling as the failure, not a generic denial', () => {
     const result = coversAttempt(
       parent,
-      attempt({ context: { amount: parseMoney('250000', 'USD'), currency: 'USD', counterparty_id: 'cp_100' } }),
+      attempt({
+        context: {
+          amount: parseMoney('250000', 'USD'),
+          currency: 'USD',
+          counterparty_id: 'cp_100',
+        },
+      }),
     );
     expect(result.covered).toBe(false);
     expect(result.failure).toEqual({
@@ -178,15 +205,23 @@ describe('coverage of a concrete attempt', () => {
   it('fails closed when the request is in a currency the ceiling is not denominated in', () => {
     const result = coversAttempt(
       parent,
-      attempt({ context: { amount: parseMoney('1', 'EUR'), currency: 'EUR', counterparty_id: 'cp_100' } }),
+      attempt({
+        context: { amount: parseMoney('1', 'EUR'), currency: 'EUR', counterparty_id: 'cp_100' },
+      }),
     );
     expect(result.covered).toBe(false);
   });
 
   it('reports an ungranted action and an ungranted resource distinctly', () => {
-    expect(coversAttempt(parent, attempt({ action: 'wire.modify' })).failure?.kind).toBe('ACTION_NOT_GRANTED');
-    expect(coversAttempt(parent, attempt({ resourceId: 'acct_999' })).failure?.kind).toBe('RESOURCE_NOT_GRANTED');
-    expect(coversAttempt(parent, attempt({ resourceType: 'ledger' })).failure?.kind).toBe('RESOURCE_NOT_GRANTED');
+    expect(coversAttempt(parent, attempt({ action: 'wire.modify' })).failure?.kind).toBe(
+      'ACTION_NOT_GRANTED',
+    );
+    expect(coversAttempt(parent, attempt({ resourceId: 'acct_999' })).failure?.kind).toBe(
+      'RESOURCE_NOT_GRANTED',
+    );
+    expect(coversAttempt(parent, attempt({ resourceType: 'ledger' })).failure?.kind).toBe(
+      'RESOURCE_NOT_GRANTED',
+    );
   });
 });
 
@@ -206,7 +241,9 @@ describe('restriction (authority decay)', () => {
   });
 
   it('never widens an allowlist, even when asked to', () => {
-    const decayed = restrictGrant(parent, { tighten: { allowed_counterparties: ['cp_100', 'cp_999'] } });
+    const decayed = restrictGrant(parent, {
+      tighten: { allowed_counterparties: ['cp_100', 'cp_999'] },
+    });
     expect(decayed.constraints.allowed_counterparties).toEqual(['cp_100']);
   });
 
@@ -252,7 +289,9 @@ describe('lease lifecycle', () => {
   it('clamps a child expiry to its parent', () => {
     const parentExpiry = new Date(T0.getTime() + 60_000);
     expect(clampExpiry(new Date(T0.getTime() + 3_600_000), parentExpiry)).toEqual(parentExpiry);
-    expect(clampExpiry(new Date(T0.getTime() + 1_000), parentExpiry)).toEqual(new Date(T0.getTime() + 1_000));
+    expect(clampExpiry(new Date(T0.getTime() + 1_000), parentExpiry)).toEqual(
+      new Date(T0.getTime() + 1_000),
+    );
   });
 });
 

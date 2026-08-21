@@ -29,7 +29,11 @@ export interface IngestSignalInput {
 const SIGNAL_TYPE = /^[a-z][a-z0-9_]{2,63}$/;
 const MAX_TTL_SECONDS = 86_400;
 
-export async function ingestSignal(client: PoolClient, keys: EvidenceKeys, input: IngestSignalInput) {
+export async function ingestSignal(
+  client: PoolClient,
+  keys: EvidenceKeys,
+  input: IngestSignalInput,
+) {
   if (!SIGNAL_TYPE.test(input.signalType)) {
     throw new ScrutexityError('INVALID_REQUEST', 'signal_type must be lower_snake_case');
   }
@@ -63,7 +67,10 @@ export async function ingestSignal(client: PoolClient, keys: EvidenceKeys, input
     throw new ScrutexityError('INVALID_REQUEST', 'issued_at may not be in the future');
   }
   if (now.getTime() - issuedAt.getTime() > MAX_TTL_SECONDS * 1000) {
-    throw new ScrutexityError('INVALID_REQUEST', 'issued_at is too far in the past to be actionable');
+    throw new ScrutexityError(
+      'INVALID_REQUEST',
+      'issued_at is too far in the past to be actionable',
+    );
   }
 
   const expiresAt = addSeconds(issuedAt, input.ttlSeconds);
@@ -106,7 +113,14 @@ export async function ingestSignal(client: PoolClient, keys: EvidenceKeys, input
         AND signal_type = $5 AND source = $6 AND superseded_at IS NULL
         AND id <> $1
       RETURNING id`,
-    [signalId, input.organizationId, input.subjectType, input.subjectId, input.signalType, input.source],
+    [
+      signalId,
+      input.organizationId,
+      input.subjectType,
+      input.subjectId,
+      input.signalType,
+      input.source,
+    ],
   );
 
   const receipt = await appendReceipt(client, keys, {

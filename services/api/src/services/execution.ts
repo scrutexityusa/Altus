@@ -39,9 +39,13 @@ export async function recordExecution(
     throw new ScrutexityError('FORBIDDEN', 'this decision was issued to a different agent');
   }
   if (decision.decision !== 'ALLOW') {
-    throw new ScrutexityError('POLICY_DENIED', `this decision was ${decision.decision}, not ALLOW`, {
-      internal: { reason_code: decision.reason_code },
-    });
+    throw new ScrutexityError(
+      'POLICY_DENIED',
+      `this decision was ${decision.decision}, not ALLOW`,
+      {
+        internal: { reason_code: decision.reason_code },
+      },
+    );
   }
   if (decision.expires_at && isExpired(decision.expires_at, new Date())) {
     throw new ScrutexityError(
@@ -67,7 +71,11 @@ export async function recordExecution(
       ],
     );
   } catch (error) {
-    if (typeof error === 'object' && error !== null && (error as { code?: string }).code === '23505') {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: string }).code === '23505'
+    ) {
       metrics.replayAttempts.inc({ kind: 'execution_grant' });
       throw new ScrutexityError(
         'REPLAY_DETECTED',

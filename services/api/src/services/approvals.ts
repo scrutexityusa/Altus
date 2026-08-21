@@ -86,7 +86,10 @@ export async function submitApproval(
     );
   } catch (error) {
     if (isUniqueViolation(error)) {
-      throw new ScrutexityError('STATE_CONFLICT', 'this approver has already voted on this request');
+      throw new ScrutexityError(
+        'STATE_CONFLICT',
+        'this approver has already voted on this request',
+      );
     }
     throw error;
   }
@@ -124,5 +127,7 @@ export async function submitApproval(
 }
 
 function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { code?: string }).code === '23505';
+  return (
+    typeof error === 'object' && error !== null && (error as { code?: string }).code === '23505'
+  );
 }

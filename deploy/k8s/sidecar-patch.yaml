@@ -1,0 +1,59 @@
+# Sidecar enforcement point.
+#
+# Apply as a strategic-merge patch to any workload whose agent must be
+# governed. The sidecar terminates on localhost only, so the enforcement point
+# is reachable by the agent and by nothing else in the cluster:
+#
+#   kubectl patch deployment treasury-agent --patch-file sidecar-patch.yaml
+#
+# The agent then points the SDK at http://127.0.0.1:8081 and gains the same
+# authorization semantics as a remote call, without the network hop. Semantics
+# are identical because every placement calls the same pure evaluator
+# (ADR-0002) -- placement changes latency and blast radius, never the answer.
+spec:
+  template:
+    metadata:
+      annotations:
+        scrutexity.dev/enforcement-point: 'sidecar'
+    spec:
+      containers:
+        - name: scrutexity-sidecar
+          image: ghcr.io/scrutexityusa/scrutexity-api:0.1.0
+          args: ['--enforcement-point']
+          ports:
+            - name: pep
+              containerPort: 8081
+          env:
+            - name: PORT
+              value: '8081'
+            # Loopback only. A sidecar listening on the pod IP would be a
+            # decision endpoint any pod in the namespace could reach.
+            - name: HOST
+              value: '127.0.0.1'
+          envFrom:
+            - configMapRef:
+                name: scrutexity-config
+            - secretRef:
+                name: scrutexity-secrets
+          livenessProbe:
+            httpGet: { path: /health, port: pep, host: 127.0.0.1 }
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /ready, port: pep, host: 127.0.0.1 }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: '100m', memory: '128Mi' }
+            limits: { memory: '256Mi' }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: scrutexity-tmp
+              mountPath: /tmp
+      volumes:
+        - name: scrutexity-tmp
+          emptyDir: {}

@@ -1,0 +1,31 @@
+# Environment-specific, non-secret configuration.
+#
+# Nothing in here is a secret. Connection strings with credentials, signing
+# keys and tokens live in the Secret, and in a real cluster that Secret is
+# projected from a secret manager rather than committed anywhere.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scrutexity-config
+  namespace: scrutexity
+data:
+  NODE_ENV: 'production'
+  LOG_LEVEL: 'info'
+  PORT: '8080'
+  HOST: '0.0.0.0'
+  DATABASE_POOL_MAX: '20'
+
+  # An ALLOW is an execution grant, and it is short-lived: an agent that did not
+  # act promptly must come back, because the risk picture may have moved.
+  EXECUTION_GRANT_TTL_SECONDS: '300'
+  APPROVAL_TTL_SECONDS: '3600'
+
+  # Non-secret identifier of the signing key currently in use. Rotating means
+  # publishing the new public key to verifiers *before* switching this over;
+  # receipts record the key id they were signed with, so old receipts stay
+  # verifiable against the old key.
+  RECEIPT_SIGNING_KEY_ID: 'prod-2026-08'
+
+  # Registering an OTLP endpoint activates trace export; the code is
+  # instrumented with @opentelemetry/api and is a no-op without a provider.
+  OTEL_SERVICE_NAME: 'scrutexity-api'

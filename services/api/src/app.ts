@@ -16,6 +16,10 @@ export interface App {
   config: Config;
   keys: EvidenceKeys;
   logger: Logger;
+  /** `"POST /v1/signals"` for every registered route. The contract drift test
+   * compares this against the committed OpenAPI document, so a route added
+   * without documenting it fails the build. */
+  routes: string[];
   close(): Promise<void>;
 }
 
@@ -47,7 +51,8 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     loggerInstance: logger,
     // The client may supply a correlation id, but it never becomes the trusted
     // identity of anything -- it only joins log lines together.
-    genReqId: (req) => (req.headers['x-request-id'] as string | undefined)?.slice(0, 128) ?? randomUUID(),
+    genReqId: (req) =>
+      (req.headers['x-request-id'] as string | undefined)?.slice(0, 128) ?? randomUUID(),
     // Fastify's own per-request lines are replaced by the structured
     // onResponse record below, which carries the tenant and principal.
     // Deprecated in favour of `logController` in Fastify 5, which currently
@@ -56,6 +61,14 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     disableRequestLogging: true,
     bodyLimit: 256 * 1024,
     trustProxy: true,
+  });
+
+  const routes: string[] = [];
+  server.addHook('onRoute', (route) => {
+    for (const method of Array.isArray(route.method) ? route.method : [route.method]) {
+      if (method === 'HEAD' || method === 'OPTIONS') continue;
+      routes.push(`${method} ${route.url}`);
+    }
   });
 
   server.addHook('onRequest', async (request, reply) => {
@@ -73,7 +86,10 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     const started = (request as unknown as { startedAt?: number }).startedAt;
     metrics.httpRequests.inc({ route, method: request.method, status: String(reply.statusCode) });
     if (started !== undefined) {
-      metrics.httpLatency.observe((performance.now() - started) / 1000, { route, method: request.method });
+      metrics.httpLatency.observe((performance.now() - started) / 1000, {
+        route,
+        method: request.method,
+      });
     }
     logger.info(
       {
@@ -122,7 +138,9 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
 
   await server.register(async (instance) => {
     instance.addHook('preHandler', async (request) => {
-      const span: Span = tracer.startSpan(`${request.method} ${request.routeOptions.url ?? request.url}`);
+      const span: Span = tracer.startSpan(
+        `${request.method} ${request.routeOptions.url ?? request.url}`,
+      );
       span.setAttribute('scrutexity.request_id', String(request.id));
       if (request.principal) {
         span.setAttribute('scrutexity.organization_id', request.principal.organization_id);
@@ -142,6 +160,7 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     config,
     keys,
     logger,
+    routes,
     close: async () => {
       await server.close();
       await db.close();

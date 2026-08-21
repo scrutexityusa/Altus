@@ -22,9 +22,13 @@ function describe(issues: { path: (string | number)[]; message: string }[]): str
 export function loadPolicyDocument(input: unknown): LoadedPolicy {
   const parsed = PolicyDocumentSchema.safeParse(input);
   if (!parsed.success) {
-    throw new ScrutexityError('INVALID_REQUEST', `invalid policy document: ${describe(parsed.error.issues)}`, {
-      details: parsed.error.issues,
-    });
+    throw new ScrutexityError(
+      'INVALID_REQUEST',
+      `invalid policy document: ${describe(parsed.error.issues)}`,
+      {
+        details: parsed.error.issues,
+      },
+    );
   }
   return { document: parsed.data, hash: policyHash(parsed.data) };
 }

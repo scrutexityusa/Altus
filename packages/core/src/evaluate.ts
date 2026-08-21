@@ -8,10 +8,26 @@ import {
   type ConstraintCheck,
   type CoverageResult,
 } from './authority/grant.js';
-import { evaluateChain, type AuthorityLease, type ChainEvaluation, type LeaseStatus } from './authority/lease.js';
+import {
+  evaluateChain,
+  type AuthorityLease,
+  type ChainEvaluation,
+  type LeaseStatus,
+} from './authority/lease.js';
 import { evaluateApprovals, type Approval, type ApprovalEvaluation } from './approval.js';
-import { evaluatePolicy, strictest, type PolicyInput, type PolicyOutcome, type SignalView } from './policy/engine.js';
-import type { ApprovalRequirement, Decision, FailoverBehavior, PolicyDocument } from './policy/schema.js';
+import {
+  evaluatePolicy,
+  strictest,
+  type PolicyInput,
+  type PolicyOutcome,
+  type SignalView,
+} from './policy/engine.js';
+import type {
+  ApprovalRequirement,
+  Decision,
+  FailoverBehavior,
+  PolicyDocument,
+} from './policy/schema.js';
 import { addSeconds, toIso } from './time.js';
 
 /**
@@ -150,7 +166,19 @@ export interface AuthorizationEvaluation {
     };
     authority_effects_applied: Array<{ rule_id: string; duration_seconds: number | null }>;
     dependency_health: DependencyHealth;
-    signals_considered: Array<Pick<SignalView, 'id' | 'signal_type' | 'subject_type' | 'subject_id' | 'value' | 'confidence' | 'source' | 'expires_at'>>;
+    signals_considered: Array<
+      Pick<
+        SignalView,
+        | 'id'
+        | 'signal_type'
+        | 'subject_type'
+        | 'subject_id'
+        | 'value'
+        | 'confidence'
+        | 'source'
+        | 'expires_at'
+      >
+    >;
   };
 }
 
@@ -222,7 +250,11 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     agent: { id: agent.id, handle: agent.handle },
     resource: request.resource,
     context: request.context,
-    authority: { present: snapshot.candidates.length > 0, lease_id: request.presented_lease_id, depth: null },
+    authority: {
+      present: snapshot.candidates.length > 0,
+      lease_id: request.presented_lease_id,
+      depth: null,
+    },
     signals: snapshot.dependencies.signals_available ? snapshot.signals : [],
   };
   const policyOutcome = evaluatePolicy(document, policyInput);
@@ -255,7 +287,9 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     const chain = evaluateChain(candidate.chain, now);
     const baseCoverage = coversAttempt(candidate.lease.grant, attempt);
     const envelopeCovered = baseCoverage.action_covered && baseCoverage.resource_covered;
-    const effectiveGrant = hasEffects ? restrictGrant(candidate.lease.grant, restriction) : candidate.lease.grant;
+    const effectiveGrant = hasEffects
+      ? restrictGrant(candidate.lease.grant, restriction)
+      : candidate.lease.grant;
     const effectiveCoverage = coversAttempt(effectiveGrant, attempt);
     return {
       lease_id: candidate.lease.id,
@@ -378,7 +412,9 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     authority_lease_id: selected?.lease_id ?? null,
     risk_signal_ids: policyOutcome.consulted_signal_ids,
     constraints_evaluated:
-      selected?.effective_coverage?.constraint_checks ?? selected?.base_coverage.constraint_checks ?? [],
+      selected?.effective_coverage?.constraint_checks ??
+      selected?.base_coverage.constraint_checks ??
+      [],
     approval_requirement: approvalRequirement,
     approval_state: approvalState,
     failover_behavior: failover,
@@ -409,18 +445,27 @@ function failoverDecision(behavior: FailoverBehavior): Decision {
  * usability, then the youngest lease -- ids are time-sortable, so "youngest"
  * is a total order rather than a coin flip.
  */
-function selectLease(findings: AuthorityFinding[], presentedLeaseId: string | null): AuthorityFinding | null {
+function selectLease(
+  findings: AuthorityFinding[],
+  presentedLeaseId: string | null,
+): AuthorityFinding | null {
   if (findings.length === 0) return null;
   if (presentedLeaseId) {
     const presented = findings.find((f) => f.lease_id === presentedLeaseId);
     if (presented) return presented;
   }
   const rank = (f: AuthorityFinding) =>
-    (f.autonomous ? 8 : 0) + (f.usable && f.envelope_covered ? 4 : 0) + (f.envelope_covered ? 2 : 0) + (f.usable ? 1 : 0);
+    (f.autonomous ? 8 : 0) +
+    (f.usable && f.envelope_covered ? 4 : 0) +
+    (f.envelope_covered ? 2 : 0) +
+    (f.usable ? 1 : 0);
   return [...findings].sort((a, b) => rank(b) - rank(a) || (a.lease_id < b.lease_id ? 1 : -1))[0]!;
 }
 
-function envelopeReasonCode(findings: AuthorityFinding[], selected: AuthorityFinding | null): string {
+function envelopeReasonCode(
+  findings: AuthorityFinding[],
+  selected: AuthorityFinding | null,
+): string {
   if (!selected) return 'AUTHORITY_MISSING';
   if (!selected.usable) {
     const status = selected.chain.blocked_by?.status;
@@ -460,7 +505,10 @@ function describeAutonomy(
   if (!selected.envelope_covered) {
     return {
       autonomous: false,
-      blocked_by: { kind: 'ENVELOPE', detail: selected.base_coverage.failure?.detail ?? 'outside the authority envelope' },
+      blocked_by: {
+        kind: 'ENVELOPE',
+        detail: selected.base_coverage.failure?.detail ?? 'outside the authority envelope',
+      },
     };
   }
   const effectiveFailure = selected.effective_coverage?.failure;
@@ -473,7 +521,10 @@ function describeAutonomy(
       autonomous: false,
       blocked_by: {
         kind: 'DECAY',
-        constraint: effectiveFailure.kind === 'CONSTRAINT_VIOLATION' ? effectiveFailure.constraint : 'actions',
+        constraint:
+          effectiveFailure.kind === 'CONSTRAINT_VIOLATION'
+            ? effectiveFailure.constraint
+            : 'actions',
         detail: effectiveFailure.detail,
         rule_ids: policyOutcome.authority_effects.map((e) => e.rule_id),
       },

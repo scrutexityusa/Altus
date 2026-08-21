@@ -55,7 +55,11 @@ export interface AuthorizeResult {
 }
 
 /** Context keys the control plane derives itself and will not accept from a caller. */
-const SERVER_DERIVED_CONTEXT = ['counterparty_known', 'counterparty_status', 'resource_known'] as const;
+const SERVER_DERIVED_CONTEXT = [
+  'counterparty_known',
+  'counterparty_status',
+  'resource_known',
+] as const;
 
 export async function authorize(
   client: PoolClient,
@@ -82,7 +86,10 @@ export async function authorize(
   // could declare its counterparty "known" would have defeated the control by
   // declaring it.
   for (const key of SERVER_DERIVED_CONTEXT) delete normalizedContext[key];
-  Object.assign(normalizedContext, await deriveContext(client, input.organizationId, normalizedContext));
+  Object.assign(
+    normalizedContext,
+    await deriveContext(client, input.organizationId, normalizedContext),
+  );
 
   // -- Replay guard ---------------------------------------------------------
   if (input.nonce) {
@@ -93,9 +100,13 @@ export async function authorize(
     );
     if ((seen.rowCount ?? 0) > 0) {
       metrics.replayAttempts.inc({ kind: 'authorization_nonce' });
-      throw new ScrutexityError('REPLAY_DETECTED', 'this authorization request has already been submitted', {
-        details: { nonce: input.nonce, original_request_id: seen.rows[0]!.id },
-      });
+      throw new ScrutexityError(
+        'REPLAY_DETECTED',
+        'this authorization request has already been submitted',
+        {
+          details: { nonce: input.nonce, original_request_id: seen.rows[0]!.id },
+        },
+      );
     }
   }
 
@@ -243,10 +254,9 @@ export async function reevaluateWithApprovals(
         WHERE id = $1 AND status = 'PENDING'`,
       [approvalRequestId, nextStatus],
     );
-    metrics.approvalLatency.observe(
-      (now.getTime() - approvalRequest.created_at.getTime()) / 1000,
-      { outcome: nextStatus },
-    );
+    metrics.approvalLatency.observe((now.getTime() - approvalRequest.created_at.getTime()) / 1000, {
+      outcome: nextStatus,
+    });
   }
 
   return { request_id: request.id, ...persisted, evaluation };
@@ -268,7 +278,10 @@ interface SnapshotInput {
   priorApproval: EvaluationSnapshot['prior_approval'];
 }
 
-async function buildSnapshot(client: PoolClient, input: SnapshotInput): Promise<EvaluationSnapshot> {
+async function buildSnapshot(
+  client: PoolClient,
+  input: SnapshotInput,
+): Promise<EvaluationSnapshot> {
   // Sequential, not Promise.all: these share one pooled client, and a pg
   // client cannot execute concurrent queries. Fanning out here would silently
   // serialise anyway today and break outright on pg 9.
@@ -324,7 +337,10 @@ function normalizeContext(context: Record<string, unknown>): Record<string, unkn
       throw new ScrutexityError('INVALID_REQUEST', 'context.amount requires context.currency');
     }
     if (typeof amount !== 'string' && typeof amount !== 'number') {
-      throw new ScrutexityError('INVALID_REQUEST', 'context.amount must be a decimal string or an integer');
+      throw new ScrutexityError(
+        'INVALID_REQUEST',
+        'context.amount must be a decimal string or an integer',
+      );
     }
     try {
       normalized['amount'] = parseMoney(amount, currency);
@@ -423,9 +439,12 @@ async function loadLiveSignals(
   now: Date,
   subjects: { agentId: string; resourceId: string; counterpartyId?: string | undefined },
 ): Promise<SignalView[]> {
-  const ids = [subjects.agentId, subjects.resourceId, subjects.counterpartyId, organizationId].filter(
-    (v): v is string => typeof v === 'string',
-  );
+  const ids = [
+    subjects.agentId,
+    subjects.resourceId,
+    subjects.counterpartyId,
+    organizationId,
+  ].filter((v): v is string => typeof v === 'string');
   const result = await client.query(
     `SELECT id, subject_type, subject_id, signal_type, value, confidence, source, issued_at, expires_at
        FROM scrutexity.risk_signals
@@ -482,8 +501,7 @@ async function loadActivePolicy(
     [organizationId],
   );
   const row = result.rows[0] as
-    | { id: string; policy_id: string; content: unknown; content_hash: string }
-    | undefined;
+    { id: string; policy_id: string; content: unknown; content_hash: string } | undefined;
   if (!row) return null;
 
   // The integrity check runs on every load, not only on a cache miss. Caching
@@ -493,9 +511,13 @@ async function loadActivePolicy(
   const storedHash = hashObject(row.content);
   if (storedHash !== row.content_hash) {
     metrics.policyEvaluationFailures.inc({ reason: 'policy_hash_mismatch' });
-    throw new ScrutexityError('POLICY_UNAVAILABLE', 'stored policy version failed its integrity check', {
-      internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: storedHash },
-    });
+    throw new ScrutexityError(
+      'POLICY_UNAVAILABLE',
+      'stored policy version failed its integrity check',
+      {
+        internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: storedHash },
+      },
+    );
   }
 
   const cached = policyCache.get(row.id);
@@ -510,9 +532,13 @@ async function loadActivePolicy(
     // The document parses, but not back to the digest it was activated under.
     // Refuse rather than evaluate against something nobody approved.
     metrics.policyEvaluationFailures.inc({ reason: 'policy_reparse_mismatch' });
-    throw new ScrutexityError('POLICY_UNAVAILABLE', 'stored policy version failed its integrity check', {
-      internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: hash },
-    });
+    throw new ScrutexityError(
+      'POLICY_UNAVAILABLE',
+      'stored policy version failed its integrity check',
+      {
+        internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: hash },
+      },
+    );
   }
   policyCache.set(row.id, { hash, document });
   return { policy_id: row.policy_id, policy_version_id: row.id, document };
@@ -608,7 +634,10 @@ async function persistDecision(
         decisionId,
         input.requestId,
         JSON.stringify(evaluation.approval_requirement),
-        addSeconds(new Date(evaluation.decision_timestamp), evaluation.approval_requirement.ttl_seconds),
+        addSeconds(
+          new Date(evaluation.decision_timestamp),
+          evaluation.approval_requirement.ttl_seconds,
+        ),
       ],
     );
   }
@@ -653,7 +682,11 @@ async function persistDecision(
   });
   if (evaluation.reason_code === 'AUTHORITY_EXPIRED') metrics.leasesExpired.inc({});
 
-  return { decision_id: decisionId, receipt_id: receipt.id, approval_request_id: approvalRequestId };
+  return {
+    decision_id: decisionId,
+    receipt_id: receipt.id,
+    approval_request_id: approvalRequestId,
+  };
 }
 
 export { lookupAction };

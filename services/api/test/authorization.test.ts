@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
-import { issueTreasuryLease, startHarness, wireRequest, ADMIN_URL, type Harness } from './harness.js';
+import {
+  issueTreasuryLease,
+  startHarness,
+  wireRequest,
+  ADMIN_URL,
+  type Harness,
+} from './harness.js';
 
 let h: Harness;
 let lease: { id: string };
@@ -98,7 +104,10 @@ describe('the authorization loop', () => {
   it('escalates above the ceiling and opens exactly one approval request', async () => {
     const response = await evaluate(
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'n-escalate-1', context: { ...wireRequest().context, amount: '250000.00' } }),
+      wireRequest({
+        nonce: 'n-escalate-1',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
     );
     expect(response.body.decision).toBe('ESCALATE');
     expect(response.body.approval_request_id).toMatch(/^apr_/);
@@ -115,7 +124,10 @@ describe('the authorization loop', () => {
   it('completes the escalation loop through a human and supersedes the escalation', async () => {
     const escalated = await evaluate(
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'n-escalate-2', context: { ...wireRequest().context, amount: '250000.00' } }),
+      wireRequest({
+        nonce: 'n-escalate-2',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
     );
     const approval = await h.call('POST', '/v1/approvals', h.tenant.tokens['treasurer']!, {
       approval_request_id: escalated.body.approval_request_id,
@@ -146,7 +158,10 @@ describe('the authorization loop', () => {
   it('requires both roles when the amount crosses the seven-figure threshold', async () => {
     const escalated = await evaluate(
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'n-dual-1', context: { ...wireRequest().context, amount: '2000000.00' } }),
+      wireRequest({
+        nonce: 'n-dual-1',
+        context: { ...wireRequest().context, amount: '2000000.00' },
+      }),
     );
     expect(escalated.body.approval_requirement).toMatchObject({
       quorum: 2,
@@ -170,7 +185,10 @@ describe('the authorization loop', () => {
   it('treats a rejection as terminal', async () => {
     const escalated = await evaluate(
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'n-reject-1', context: { ...wireRequest().context, amount: '250000.00' } }),
+      wireRequest({
+        nonce: 'n-reject-1',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
     );
     const rejection = await h.call('POST', '/v1/approvals', h.tenant.tokens['treasurer']!, {
       approval_request_id: escalated.body.approval_request_id,
@@ -210,12 +228,24 @@ describe('the authorization loop', () => {
   it('is idempotent under a retried evaluation', async () => {
     const body = wireRequest({ nonce: 'n-idem-unique' });
     const key = 'idem-key-evaluate-1';
-    const first = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, body, {
-      'idempotency-key': key,
-    });
-    const second = await h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['treasury_agent']!, body, {
-      'idempotency-key': key,
-    });
+    const first = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      body,
+      {
+        'idempotency-key': key,
+      },
+    );
+    const second = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      body,
+      {
+        'idempotency-key': key,
+      },
+    );
     expect(first.body.decision_id).toBe(second.body.decision_id);
     expect(first.body.receipt_id).toBe(second.body.receipt_id);
   });
@@ -245,7 +275,10 @@ describe('signals and authority decay', () => {
   it('narrows autonomy while a signal is live and restores it once it expires', async () => {
     const agentId = h.tenant.agents['treasury']!;
 
-    const before = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-decay-before' }));
+    const before = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-decay-before' }),
+    );
     expect(before.body.decision).toBe('ALLOW');
 
     const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
@@ -258,7 +291,10 @@ describe('signals and authority decay', () => {
     });
     expect(ingested.status).toBe(201);
 
-    const during = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-decay-during' }));
+    const during = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-decay-during' }),
+    );
     expect(during.body.decision).toBe('ESCALATE');
     expect(during.body.reason_code).toBe('AUTHORITY_DECAYED');
     expect(during.body.risk_signal_ids).toContain(ingested.body.signal.id);
@@ -267,7 +303,10 @@ describe('signals and authority decay', () => {
     // passing would. Freshness is enforced at read, so authority returns.
     const admin = new pg.Client({ connectionString: ADMIN_URL });
     await admin.connect();
-    await admin.query('SELECT set_config($1,$2,false)', ['scrutexity.org_id', h.tenant.organization_id]);
+    await admin.query('SELECT set_config($1,$2,false)', [
+      'scrutexity.org_id',
+      h.tenant.organization_id,
+    ]);
     await admin.query(
       `UPDATE scrutexity.risk_signals
           SET issued_at = now() - interval '20 minutes', expires_at = now() - interval '1 second'
@@ -276,7 +315,10 @@ describe('signals and authority decay', () => {
     );
     await admin.end();
 
-    const after = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-decay-after' }));
+    const after = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-decay-after' }),
+    );
     expect(after.body.decision).toBe('ALLOW');
     expect(after.body.risk_signal_ids).toEqual([]);
   });
@@ -304,7 +346,10 @@ describe('signals and authority decay', () => {
 
 describe('evidence', () => {
   it('verifies a receipt and its chain segment', async () => {
-    const allowed = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-receipt-1' }));
+    const allowed = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-receipt-1' }),
+    );
     const verification = await h.call(
       'POST',
       `/v1/receipts/${allowed.body.receipt_id}/verify`,
@@ -314,16 +359,30 @@ describe('evidence', () => {
     expect(verification.body.integrity).toBe('INTACT');
     expect(verification.body.attests).toBe('evidence_integrity_and_provenance');
     expect(verification.body.chain_verification.intact).toBe(true);
-    expect(verification.body.receipt_verification.checks.map((c: { check: string }) => c.check)).toContain(
-      'SIGNATURE',
-    );
+    expect(
+      verification.body.receipt_verification.checks.map((c: { check: string }) => c.check),
+    ).toContain('SIGNATURE');
   });
 
   it('links receipts into one chain per tenant', async () => {
-    const a = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-chain-a' }));
-    const b = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-chain-b' }));
-    const first = await h.call('GET', `/v1/receipts/${a.body.receipt_id}`, h.tenant.tokens['admin']!);
-    const second = await h.call('GET', `/v1/receipts/${b.body.receipt_id}`, h.tenant.tokens['admin']!);
+    const a = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-chain-a' }),
+    );
+    const b = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-chain-b' }),
+    );
+    const first = await h.call(
+      'GET',
+      `/v1/receipts/${a.body.receipt_id}`,
+      h.tenant.tokens['admin']!,
+    );
+    const second = await h.call(
+      'GET',
+      `/v1/receipts/${b.body.receipt_id}`,
+      h.tenant.tokens['admin']!,
+    );
     expect(second.body.receipt.seq).toBe(first.body.receipt.seq + 1);
     expect(second.body.receipt.previous_hash).toBe(first.body.receipt.hash);
   });
@@ -331,7 +390,10 @@ describe('evidence', () => {
 
 describe('execution grants', () => {
   it('is single-use', async () => {
-    const allowed = await evaluate(h.tenant.tokens['treasury_agent']!, wireRequest({ nonce: 'n-exec-1' }));
+    const allowed = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'n-exec-1' }),
+    );
     const first = await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
       decision_id: allowed.body.decision_id,
       status: 'SUCCEEDED',
@@ -348,7 +410,10 @@ describe('execution grants', () => {
   it('refuses execution against a decision that was not an ALLOW', async () => {
     const escalated = await evaluate(
       h.tenant.tokens['treasury_agent']!,
-      wireRequest({ nonce: 'n-exec-2', context: { ...wireRequest().context, amount: '250000.00' } }),
+      wireRequest({
+        nonce: 'n-exec-2',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
     );
     const attempt = await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
       decision_id: escalated.body.decision_id,

@@ -110,11 +110,16 @@ export function lookupAction(action: string): ActionDefinition | undefined {
  * Which constraint dimensions bind a given action. A dimension binds when the
  * action is defined to carry the field that dimension reads.
  */
-export function applicableDimensions(action: string, dimensionPaths: Record<ConstraintName, string>) {
+export function applicableDimensions(
+  action: string,
+  dimensionPaths: Record<ConstraintName, string>,
+) {
   const definition = ACTION_CATALOG[action];
   const entries = Object.entries(dimensionPaths) as [ConstraintName, string][];
   if (!definition) return [] as ConstraintName[];
-  return entries.filter(([, path]) => definition.context_fields.includes(path)).map(([name]) => name);
+  return entries
+    .filter(([, path]) => definition.context_fields.includes(path))
+    .map(([name]) => name);
 }
 
 export interface ActionValidation {

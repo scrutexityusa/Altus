@@ -54,11 +54,31 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
 
     const users: Record<string, string> = {};
     const userSpecs = [
-      { key: 'admin', email: 'ops.admin@acme.example', name: 'Dana Okafor', roles: ['admin', 'policy_author'] },
-      { key: 'reviewer', email: 'risk.reviewer@acme.example', name: 'Priya Raman', roles: ['admin', 'policy_reviewer'] },
-      { key: 'treasurer', email: 'treasurer@acme.example', name: 'Marco Bellini', roles: ['treasurer', 'policy_reviewer'] },
+      {
+        key: 'admin',
+        email: 'ops.admin@acme.example',
+        name: 'Dana Okafor',
+        roles: ['admin', 'policy_author'],
+      },
+      {
+        key: 'reviewer',
+        email: 'risk.reviewer@acme.example',
+        name: 'Priya Raman',
+        roles: ['admin', 'policy_reviewer'],
+      },
+      {
+        key: 'treasurer',
+        email: 'treasurer@acme.example',
+        name: 'Marco Bellini',
+        roles: ['treasurer', 'policy_reviewer'],
+      },
       { key: 'cfo', email: 'cfo@acme.example', name: 'Aiko Tanaka', roles: ['cfo', 'treasurer'] },
-      { key: 'agent_owner', email: 'treasury.ops@acme.example', name: 'Sam Whitfield', roles: ['operator'] },
+      {
+        key: 'agent_owner',
+        email: 'treasury.ops@acme.example',
+        name: 'Sam Whitfield',
+        roles: ['operator'],
+      },
     ];
     for (const spec of userSpecs) {
       const id = newId('user');
@@ -97,12 +117,42 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
     }
 
     const resourceSpecs = [
-      { type: 'bank_account', external: 'acct_001', name: 'Operating Account — USD', attrs: { currency: 'USD', region: 'US' } },
-      { type: 'bank_account', external: 'acct_002', name: 'Payroll Account — USD', attrs: { currency: 'USD', region: 'US' } },
-      { type: 'bank_account', external: 'acct_003', name: 'Reserve Account — USD', attrs: { currency: 'USD', region: 'US', restricted: true } },
-      { type: 'counterparty', external: 'cp_100', name: 'Northwind Logistics', attrs: { status: 'VERIFIED', country: 'US' } },
-      { type: 'counterparty', external: 'cp_101', name: 'Helvetica Components AG', attrs: { status: 'VERIFIED', country: 'CH' } },
-      { type: 'counterparty', external: 'cp_102', name: 'Marlow Facilities Ltd', attrs: { status: 'PROVISIONAL', country: 'GB' } },
+      {
+        type: 'bank_account',
+        external: 'acct_001',
+        name: 'Operating Account — USD',
+        attrs: { currency: 'USD', region: 'US' },
+      },
+      {
+        type: 'bank_account',
+        external: 'acct_002',
+        name: 'Payroll Account — USD',
+        attrs: { currency: 'USD', region: 'US' },
+      },
+      {
+        type: 'bank_account',
+        external: 'acct_003',
+        name: 'Reserve Account — USD',
+        attrs: { currency: 'USD', region: 'US', restricted: true },
+      },
+      {
+        type: 'counterparty',
+        external: 'cp_100',
+        name: 'Northwind Logistics',
+        attrs: { status: 'VERIFIED', country: 'US' },
+      },
+      {
+        type: 'counterparty',
+        external: 'cp_101',
+        name: 'Helvetica Components AG',
+        attrs: { status: 'VERIFIED', country: 'CH' },
+      },
+      {
+        type: 'counterparty',
+        external: 'cp_102',
+        name: 'Marlow Facilities Ltd',
+        attrs: { status: 'PROVISIONAL', country: 'GB' },
+      },
     ];
     for (const spec of resourceSpecs) {
       await client.query(
@@ -121,7 +171,13 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
     await client.query(
       `INSERT INTO scrutexity.policies (id, organization_id, key, name, description)
        VALUES ($1,$2,$3,$4,$5)`,
-      [policyId, orgId, document.id, document.metadata.title, document.metadata.description ?? null],
+      [
+        policyId,
+        orgId,
+        document.id,
+        document.metadata.title,
+        document.metadata.description ?? null,
+      ],
     );
 
     const policyVersionId = newId('policyVersion');
@@ -129,7 +185,15 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
       `INSERT INTO scrutexity.policy_versions
          (id, organization_id, policy_id, version, status, content, content_hash, author_user_id)
        VALUES ($1,$2,$3,$4,'DRAFT',$5,$6,$7)`,
-      [policyVersionId, orgId, policyId, document.version, JSON.stringify(document), hash, users['admin']],
+      [
+        policyVersionId,
+        orgId,
+        policyId,
+        document.version,
+        JSON.stringify(document),
+        hash,
+        users['admin'],
+      ],
     );
 
     for (const reviewer of ['reviewer', 'treasurer'] as const) {
@@ -156,12 +220,49 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
     // -- Credentials --------------------------------------------------------
     const tokens: Record<string, string> = {};
     const credentialSpecs = [
-      { key: 'admin', type: 'user' as const, principal: users['admin']!, scopes: ['read', 'admin:write', 'leases:write', 'policies:write', 'signals:write', 'authorization:evaluate'] },
-      { key: 'treasurer', type: 'user' as const, principal: users['treasurer']!, scopes: ['read', 'approvals:write'] },
-      { key: 'cfo', type: 'user' as const, principal: users['cfo']!, scopes: ['read', 'approvals:write'] },
-      { key: 'treasury_agent', type: 'agent' as const, principal: agents['treasury']!, scopes: ['read', 'authorization:evaluate', 'delegation:create'] },
-      { key: 'verification_agent', type: 'agent' as const, principal: agents['verification']!, scopes: ['read', 'authorization:evaluate'] },
-      { key: 'fraud_engine', type: 'service' as const, principal: 'svc_fraud_engine', scopes: ['signals:write'] },
+      {
+        key: 'admin',
+        type: 'user' as const,
+        principal: users['admin']!,
+        scopes: [
+          'read',
+          'admin:write',
+          'leases:write',
+          'policies:write',
+          'signals:write',
+          'authorization:evaluate',
+        ],
+      },
+      {
+        key: 'treasurer',
+        type: 'user' as const,
+        principal: users['treasurer']!,
+        scopes: ['read', 'approvals:write'],
+      },
+      {
+        key: 'cfo',
+        type: 'user' as const,
+        principal: users['cfo']!,
+        scopes: ['read', 'approvals:write'],
+      },
+      {
+        key: 'treasury_agent',
+        type: 'agent' as const,
+        principal: agents['treasury']!,
+        scopes: ['read', 'authorization:evaluate', 'delegation:create'],
+      },
+      {
+        key: 'verification_agent',
+        type: 'agent' as const,
+        principal: agents['verification']!,
+        scopes: ['read', 'authorization:evaluate'],
+      },
+      {
+        key: 'fraud_engine',
+        type: 'service' as const,
+        principal: 'svc_fraud_engine',
+        scopes: ['signals:write'],
+      },
     ];
     for (const spec of credentialSpecs) {
       const { token, prefix, hash: tokenHash } = issueToken();
@@ -198,7 +299,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   process.stdout.write(
     [
       `seeded organization ${result.organization_id}`,
-      `  agents:    ${Object.entries(result.agents).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+      `  agents:    ${Object.entries(result.agents)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ')}`,
       `  policy:    ${result.policy_version_id} (ACTIVE)`,
       `  tokens written to ${outputPath} (git-ignored; development only)`,
       '',

@@ -49,9 +49,7 @@ export const CreateLeaseSchema = z
   })
   .strict();
 
-export const RevokeLeaseSchema = z
-  .object({ reason: z.string().min(3).max(500) })
-  .strict();
+export const RevokeLeaseSchema = z.object({ reason: z.string().min(3).max(500) }).strict();
 
 export const CreateDelegationSchema = z
   .object({
@@ -102,7 +100,10 @@ export const CreatePolicyVersionSchema = z
   .object({
     /** The policy document, as YAML text or an already-parsed object. */
     document: z.union([z.string(), z.record(z.string(), z.unknown())]),
-    policy_key: z.string().regex(/^[a-z][a-z0-9_]{2,63}$/).optional(),
+    policy_key: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{2,63}$/)
+      .optional(),
   })
   .strict();
 
