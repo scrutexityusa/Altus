@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   canonicalOperation,
+  describeInvariantFailure,
+  verifyAuthorityInvariants,
+  type AuthorityLease,
+  type InvariantReport,
   computeBindingHash,
   computeIntentHash,
   type ExecutionGrantBinding,
@@ -207,6 +211,9 @@ export async function authorize(
   const evaluation = evaluateAuthorization(snapshot);
   metrics.policyEvaluationLatency.observe((performance.now() - evaluationStarted) / 1000);
 
+  // Before the ALLOW is written, let alone returned.
+  assertAuthorityInvariants(evaluation, snapshot, now, input.organizationId);
+
   // The approval request id is minted before the corrective handshake is
   // computed, so an escalation can hand the caller the request it must act on
   // rather than a null it has to go and look up.
@@ -299,6 +306,11 @@ export async function reevaluateWithApprovals(
   });
 
   const evaluation = evaluateAuthorization(snapshot);
+  // A human approval releases authority, so it goes through the same
+  // postcondition as an autonomous ALLOW. An approver cannot authorise a
+  // violation of the laws either.
+  assertAuthorityInvariants(evaluation, snapshot, now, organizationId);
+
   const reevaluationActions = await buildCorrectiveActions(client, evaluation, snapshot, {
     // The escalation is being resolved, not reopened, so there is no new
     // approval request to point at.
@@ -867,6 +879,88 @@ function buildBinding(
     binding_hash: computeBindingHash(binding),
     binding,
   };
+}
+
+/**
+ * The postcondition on every ALLOW.
+ *
+ * The evaluator already used the containment lattice to *derive* its answer.
+ * This checks the answer against the laws afterwards, which is a different
+ * thing: derivation is only as good as the code doing it, and a bug there --
+ * or a row written straight to the database, or a dropped constraint --
+ * previously produced a wrong ALLOW with nothing to notice.
+ *
+ * Runs only for ALLOW. A DENY that violates an invariant is still a DENY, and
+ * re-checking it would spend work to reach the same refusal; an ESCALATE has
+ * not conferred anything yet and will pass through here when it is resolved.
+ *
+ * A violation is never a policy denial. `AUTHORITY_INVARIANT_VIOLATION` exists
+ * so an operator who sees denials all day cannot miss the one that means the
+ * system's model of its own authority is wrong.
+ */
+function assertAuthorityInvariants(
+  evaluation: AuthorizationEvaluation,
+  snapshot: { candidates: readonly { lease: AuthorityLease; chain: readonly AuthorityLease[] }[] },
+  now: Date,
+  organizationId: string,
+): void {
+  if (evaluation.decision !== 'ALLOW') return;
+
+  const leaseId = evaluation.evaluation.selected_lease_id;
+  if (!leaseId) return;
+
+  const candidate = snapshot.candidates.find((c) => c.lease.id === leaseId);
+  const finding = evaluation.evaluation.authority_findings.find((f) => f.lease_id === leaseId);
+  if (!candidate) {
+    // An ALLOW naming a lease that was not among the candidates evaluated is
+    // itself a violation: the decision rests on authority the evaluator did
+    // not see.
+    throw invariantViolation(
+      { valid: false, checks: [], failed: ['ANCESTRY_COMPLETE'] },
+      organizationId,
+      evaluation,
+      { reason: 'selected lease was not among the evaluated candidates', lease_id: leaseId },
+    );
+  }
+
+  const report = verifyAuthorityInvariants({
+    now,
+    chain: candidate.chain,
+    effectiveGrant: finding?.effective_grant ?? undefined,
+  });
+  if (report.valid) return;
+
+  metrics.authorityInvariantViolations.inc({ invariant: report.failed.join('+') });
+  throw invariantViolation(report, organizationId, evaluation, {});
+}
+
+function invariantViolation(
+  report: InvariantReport,
+  organizationId: string,
+  evaluation: AuthorizationEvaluation,
+  extra: Record<string, unknown>,
+): ScrutexityError {
+  return new ScrutexityError('AUTHORITY_INVARIANT_VIOLATION', describeInvariantFailure(report), {
+    // The caller learns nothing beyond the generic message. A principal that
+    // can probe which law broke can map the authority graph by watching
+    // which of its requests trip which invariant.
+    internal: {
+      securityEvent: {
+        organizationId,
+        kind: 'AUTHORITY_INVARIANT_VIOLATION',
+        subjectId: evaluation.agent_id,
+        detail: {
+          failed: report.failed,
+          checks: report.checks.filter((c) => !c.passed),
+          action: evaluation.action,
+          resource_type: evaluation.resource.type,
+          authority_lease_id: evaluation.authority_lease_id,
+          policy_version_id: evaluation.policy_version_id,
+          ...extra,
+        },
+      },
+    },
+  });
 }
 
 /**

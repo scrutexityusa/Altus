@@ -419,60 +419,65 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       }
     }
 
-    return mutate(request, endpoint, async (client) => {
-      const result = await authorize(client, keys, {
-        organizationId: request.principal.organization_id,
-        agentHandleOrId: body.agent_id,
-        action: body.action,
-        resource: body.resource,
-        context: body.context,
-        presentedLeaseId: body.authority_lease_id ?? null,
-        declaredIntent: body.declared_intent ?? null,
-        nonce: body.nonce ?? null,
-        idempotencyKey: (request.headers['idempotency-key'] as string | undefined) ?? null,
-        correlationId: body.correlation_id ?? null,
-      });
-      return {
-        // 200 for every evaluated outcome. A DENY is a successful evaluation
-        // that answered "no"; returning 4xx would conflate it with a
-        // malformed request and break clients that branch on status.
-        status: 200,
-        body: {
-          authorization_request_id: result.request_id,
-          decision_id: result.decision_id,
-          receipt_id: result.receipt_id,
-          approval_request_id: result.approval_request_id,
-          decision: result.evaluation.decision,
-          reason_code: result.evaluation.reason_code,
-          policy_id: result.evaluation.policy_id,
-          policy_version: result.evaluation.policy_version,
-          policy_hash: result.evaluation.policy_hash,
-          authority_lease_id: result.evaluation.authority_lease_id,
-          risk_signal_ids: result.evaluation.risk_signal_ids,
-          constraints_evaluated: result.evaluation.constraints_evaluated,
-          approval_requirement: result.evaluation.approval_requirement,
-          // The structured intent verdict. Never prose; the explanation
-          // compiler renders this same data as text.
-          intent_evaluation: result.evaluation.intent_evaluation,
-          // The next legitimate step, when one exists. Computed by the policy
-          // layer from this decision -- see packages/core/src/corrective.ts.
-          corrective_actions: result.corrective_actions,
-          // Fingerprint of the conditions this decision rests on.
-          context_hash: result.evaluation.context_hash,
-          // The exact operation this ALLOW authorises, bound to this ALLOW.
-          // Null for a DENY or an ESCALATE: nothing was authorised, so there
-          // is nothing to bind. The caller does not need these to execute --
-          // the enforcement boundary recomputes both from its own records --
-          // but returning them lets a caller confirm up front that the system
-          // understood the operation the same way it did.
-          exact_intent_hash: result.exact_intent_hash,
-          binding_hash: result.binding_hash,
-          failover_behavior: result.evaluation.failover_behavior,
-          expires_at: result.evaluation.expires_at,
-          decision_timestamp: result.evaluation.decision_timestamp,
-        },
-      };
-    });
+    // An invariant violation on this path carries a security event, and the
+    // transaction that produced it is about to roll back -- so the write has
+    // to happen outside it. See services/security-events.ts.
+    return recordingRejections(request, () =>
+      mutate(request, endpoint, async (client) => {
+        const result = await authorize(client, keys, {
+          organizationId: request.principal.organization_id,
+          agentHandleOrId: body.agent_id,
+          action: body.action,
+          resource: body.resource,
+          context: body.context,
+          presentedLeaseId: body.authority_lease_id ?? null,
+          declaredIntent: body.declared_intent ?? null,
+          nonce: body.nonce ?? null,
+          idempotencyKey: (request.headers['idempotency-key'] as string | undefined) ?? null,
+          correlationId: body.correlation_id ?? null,
+        });
+        return {
+          // 200 for every evaluated outcome. A DENY is a successful evaluation
+          // that answered "no"; returning 4xx would conflate it with a
+          // malformed request and break clients that branch on status.
+          status: 200,
+          body: {
+            authorization_request_id: result.request_id,
+            decision_id: result.decision_id,
+            receipt_id: result.receipt_id,
+            approval_request_id: result.approval_request_id,
+            decision: result.evaluation.decision,
+            reason_code: result.evaluation.reason_code,
+            policy_id: result.evaluation.policy_id,
+            policy_version: result.evaluation.policy_version,
+            policy_hash: result.evaluation.policy_hash,
+            authority_lease_id: result.evaluation.authority_lease_id,
+            risk_signal_ids: result.evaluation.risk_signal_ids,
+            constraints_evaluated: result.evaluation.constraints_evaluated,
+            approval_requirement: result.evaluation.approval_requirement,
+            // The structured intent verdict. Never prose; the explanation
+            // compiler renders this same data as text.
+            intent_evaluation: result.evaluation.intent_evaluation,
+            // The next legitimate step, when one exists. Computed by the policy
+            // layer from this decision -- see packages/core/src/corrective.ts.
+            corrective_actions: result.corrective_actions,
+            // Fingerprint of the conditions this decision rests on.
+            context_hash: result.evaluation.context_hash,
+            // The exact operation this ALLOW authorises, bound to this ALLOW.
+            // Null for a DENY or an ESCALATE: nothing was authorised, so there
+            // is nothing to bind. The caller does not need these to execute --
+            // the enforcement boundary recomputes both from its own records --
+            // but returning them lets a caller confirm up front that the system
+            // understood the operation the same way it did.
+            exact_intent_hash: result.exact_intent_hash,
+            binding_hash: result.binding_hash,
+            failover_behavior: result.evaluation.failover_behavior,
+            expires_at: result.evaluation.expires_at,
+            decision_timestamp: result.evaluation.decision_timestamp,
+          },
+        };
+      }),
+    );
   };
 
   app.post('/v1/authorization-requests', async (request, reply) => {

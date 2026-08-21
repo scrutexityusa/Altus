@@ -269,9 +269,8 @@ Section 37 says comments are not controls. Two current claims fail that test:
 
 1. ~~**G-14**~~ — **done.** `audit:read` plus subject scoping; also closed the
    unnamed object-level hole the first sweep missed.
-2. **G-4** — `verifyAuthorityInvariants()` as a runtime security boundary with
-   `AUTHORITY_INVARIANT_VIOLATION`. Also closes G-3 by re-verifying containment
-   per decision rather than only at creation.
+2. ~~**G-4**~~ — **done.** Postcondition on every ALLOW, on both the
+   autonomous and the post-approval path; closed G-3 with it.
 3. **G-2** — issuable authority. The largest design change, and the one that
    makes the top of the theorem true rather than assumed.
 4. **G-12** — database time for every expiry comparison, with a skew test.

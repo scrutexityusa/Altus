@@ -203,6 +203,14 @@ export const metrics = {
     'scrutexity_executions_unresolved_total',
     'Enforced executions that ended without an answer from the provider, by provider',
   ),
+  /**
+   * Any non-zero value here is an incident, not a trend. Alert on the first
+   * one within a five-minute window and route it to the security team.
+   */
+  authorityInvariantViolations: counter(
+    'scrutexity_authority_invariant_violations_total',
+    'Decisions refused because a constitutional authority invariant did not hold',
+  ),
   securityEvents: counter('scrutexity_security_events_total', 'Security events recorded, by kind'),
   policyEvaluationFailures: counter(
     'scrutexity_policy_evaluation_failures_total',

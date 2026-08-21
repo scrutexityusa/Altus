@@ -102,6 +102,7 @@
                   "POLICY_UNAVAILABLE",
                   "SIGNAL_UNAVAILABLE",
                   "ENFORCEMENT_UNAVAILABLE",
+                  "AUTHORITY_INVARIANT_VIOLATION",
                   "REPLAY_DETECTED",
                   "IDEMPOTENCY_CONFLICT",
                   "EVIDENCE_TAMPERED",

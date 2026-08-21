@@ -908,3 +908,124 @@ describe('an agent cannot read another agent’s records', () => {
     expect(asOperator.status).toBe(200);
   });
 });
+
+describe('the authority invariants are enforced at runtime', () => {
+  /**
+   * The evaluator uses the containment lattice to derive its answer. These
+   * tests corrupt the stored authority *behind* the evaluator, so the lattice
+   * it derives from is already wrong, and assert the postcondition catches it.
+   *
+   * This is the case a derivation-only system misses completely: every code
+   * path behaves correctly and the answer is still unlawful.
+   */
+  async function delegatedChain() {
+    const parent = await issueTreasuryLease(h);
+    const delegation = await h.call('POST', '/v1/delegations', h.tenant.tokens['treasury_agent']!, {
+      issuer_agent_id: h.tenant.agents['treasury'],
+      delegate_agent_id: 'verification-agent',
+      parent_lease_id: parent.id,
+      grant: {
+        actions: ['counterparty.read'],
+        resources: { counterparty: ['cp_100'] },
+        constraints: {
+          max_amount: { currency: 'USD', amountMinor: '0' },
+          currencies: ['USD'],
+          allowed_counterparties: ['cp_100'],
+        },
+      },
+      ttl_seconds: 3600,
+    });
+    expect(delegation.status, JSON.stringify(delegation.body)).toBe(201);
+    return { parent, child: delegation.body.child_lease };
+  }
+
+  const readAsDelegate = (leaseId: string, nonce: string) =>
+    h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['verification_agent']!, {
+      agent_id: 'verification-agent',
+      action: 'counterparty.read',
+      resource: { type: 'counterparty', id: 'cp_100' },
+      context: { counterparty_id: 'cp_100' },
+      authority_lease_id: leaseId,
+      nonce,
+    });
+
+  it('refuses an ALLOW when a child grant exceeds its parent', async () => {
+    const { child } = await delegatedChain();
+
+    // wire.modify is not in the parent's grant, so this child now claims
+    // authority its parent never held. The delegation API refused to create
+    // it; write it anyway, the way a bug or a compromised database would.
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.authority_leases
+            SET actions = ARRAY['wire.modify','counterparty.read']
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+
+    const result = await readAsDelegate(child.id, 'invariant-child-exceeds');
+    expect(result.status).toBe(403);
+    expect(result.body.error.code).toBe('AUTHORITY_INVARIANT_VIOLATION');
+  });
+
+  it('records a security event that survives the refused transaction', async () => {
+    let events: Record<string, unknown>[] = [];
+    await asOwner(async (client) => {
+      const rows = await client.query(
+        `SELECT kind, subject_id, detail FROM scrutexity.security_events
+          WHERE kind = 'AUTHORITY_INVARIANT_VIOLATION' ORDER BY created_at DESC`,
+      );
+      events = rows.rows as Record<string, unknown>[];
+    });
+    expect(events.length, 'the violation rolled back its own evidence').toBeGreaterThan(0);
+    const detail = events[0]!['detail'] as { failed: string[] };
+    expect(detail.failed).toContain('CHILD_SUBSET_OF_PARENT');
+  });
+
+  it('never tells the caller which law broke', async () => {
+    // A principal that can probe which invariant it tripped can map the
+    // authority graph by watching which of its requests fail how.
+    const { child } = await delegatedChain();
+    await asOwner(async (client) => {
+      await client.query(
+        // Keeps counterparty.read so the request still reaches an ALLOW --
+        // the postcondition runs on ALLOW, and a DENY needs no re-checking.
+        `UPDATE scrutexity.authority_leases
+            SET actions = ARRAY['wire.modify','counterparty.read']
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+    const result = await readAsDelegate(child.id, 'invariant-no-leak');
+    const body = JSON.stringify(result.body);
+    expect(body).not.toContain('CHILD_SUBSET_OF_PARENT');
+    expect(body).not.toContain('lease_');
+  });
+
+  it('does not report a violation as an ordinary policy denial', async () => {
+    const { child } = await delegatedChain();
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.authority_leases
+            SET resources = '{"counterparty":["*"],"bank_account":["*"]}'::jsonb
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+
+    const result = await readAsDelegate(child.id, 'invariant-not-a-denial');
+    // POLICY_DENIED is ordinary and an operator sees it all day. This is not
+    // that, and must not be filed as that.
+    expect(result.body.error.code).not.toBe('POLICY_DENIED');
+    expect(result.body.error.code).toBe('AUTHORITY_INVARIANT_VIOLATION');
+    expect(result.body.decision).toBeUndefined();
+  });
+
+  it('leaves a lawful chain completely unaffected', async () => {
+    const { child } = await delegatedChain();
+    const result = await readAsDelegate(child.id, 'invariant-lawful');
+    expect(result.status).toBe(200);
+    expect(result.body.decision).toBe('ALLOW');
+  });
+});

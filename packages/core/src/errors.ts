@@ -29,6 +29,15 @@ export const ERROR_CODES = [
   'SIGNAL_UNAVAILABLE',
   'ENFORCEMENT_UNAVAILABLE',
   // Integrity
+  /**
+   * A constitutional invariant did not hold at runtime.
+   *
+   * Deliberately distinct from POLICY_DENIED. A policy denial is ordinary and
+   * an operator sees them all day; this means the system's model of its own
+   * authority is wrong, which is a different and much worse fact. Collapsing
+   * it into a generic 403 would bury the one signal nobody may miss.
+   */
+  'AUTHORITY_INVARIANT_VIOLATION',
   'REPLAY_DETECTED',
   'IDEMPOTENCY_CONFLICT',
   'EVIDENCE_TAMPERED',
@@ -64,6 +73,7 @@ const STATUS: Record<ErrorCode, number> = {
   REPLAY_DETECTED: 409,
   IDEMPOTENCY_CONFLICT: 409,
   EVIDENCE_TAMPERED: 422,
+  AUTHORITY_INVARIANT_VIOLATION: 403,
   STATE_CONFLICT: 409,
   NOT_FOUND: 404,
   RATE_LIMITED: 429,
@@ -172,6 +182,8 @@ const GENERIC_MESSAGES: Record<ErrorCode, string> = {
     'The conditions changed since this action was approved. It must be re-evaluated and re-approved.',
   CONTEXT_CHANGED:
     'The conditions changed since this action was authorised. It must be re-evaluated.',
+  AUTHORITY_INVARIANT_VIOLATION:
+    'This request was refused because an authority invariant did not hold. It has been recorded for review.',
   SIGNAL_SIGNATURE_INVALID: 'The signal signature did not verify.',
   SIGNAL_KEY_UNKNOWN: 'No active signing key matches this signal.',
   POLICY_UNAVAILABLE: 'The policy could not be evaluated.',

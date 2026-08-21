@@ -19,6 +19,7 @@ export * from './operation.js';
 
 export * from './authority/grant.js';
 export * from './authority/lease.js';
+export * from './invariants.js';
 
 export * from './policy/schema.js';
 export * from './policy/predicate.js';
