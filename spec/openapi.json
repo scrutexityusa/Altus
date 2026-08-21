@@ -1,0 +1,4052 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Scrutexity Authority Control Plane",
+    "version": "1.0.0",
+    "description": "Runtime authorization for high-consequence agent actions.\n\nThe API answers one question: was this agent authorized to perform this action,\non this resource, under this context, at this exact point in time -- and it answers\nit deterministically, with evidence.\n\n## Tenancy\nThe organization is derived from the authenticated credential. There is no tenant\nheader and no tenant field in any request body: a client that could name its own\ntenant would have defeated isolation in one line.\n\n## Decisions are not errors\nPOST /v1/authorization/evaluate returns 200 for ALLOW, DENY and ESCALATE alike.\nA denial is a successful evaluation that answered \"no\"; returning 4xx would\nconflate it with a malformed request. Branch on `decision`, never on status.\n\n## Caching\nNever cache a decision. It is valid only for the policy version, authority lease\nand signal state it was made under, none of which the client can observe changing.\nAn ALLOW carries `expires_at` and is single-use against POST /v1/executions.",
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.scrutexity.dev",
+      "description": "Hosted control plane"
+    },
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Agents",
+      "description": "Machine identities and their human owners"
+    },
+    {
+      "name": "Authority",
+      "description": "Authority leases and delegation"
+    },
+    {
+      "name": "Authorization",
+      "description": "Runtime decisions and execution grants"
+    },
+    {
+      "name": "Signals",
+      "description": "Risk assertions from external systems"
+    },
+    {
+      "name": "Approvals",
+      "description": "Human decisions on escalated actions"
+    },
+    {
+      "name": "Evidence",
+      "description": "Tamper-evident receipts and their verification"
+    },
+    {
+      "name": "Policy",
+      "description": "Policy versions and their lifecycle"
+    },
+    {
+      "name": "Operations",
+      "description": "Health, readiness and metrics"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A credential issued to one agent, one human, or one service, in the form `scr_<prefix>.<secret>`. The credential determines the tenant *and* the principal: an agent credential cannot administer the control plane, cannot issue itself authority, and cannot stand in for a human approver."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "UNAUTHORIZED",
+                  "FORBIDDEN",
+                  "INVALID_REQUEST",
+                  "POLICY_DENIED",
+                  "APPROVAL_REQUIRED",
+                  "AUTHORITY_MISSING",
+                  "AUTHORITY_EXPIRED",
+                  "AUTHORITY_REVOKED",
+                  "AUTHORITY_SUSPENDED",
+                  "CONSTRAINT_VIOLATION",
+                  "DELEGATION_EXCEEDS_PARENT",
+                  "POLICY_UNAVAILABLE",
+                  "SIGNAL_UNAVAILABLE",
+                  "ENFORCEMENT_UNAVAILABLE",
+                  "REPLAY_DETECTED",
+                  "IDEMPOTENCY_CONFLICT",
+                  "EVIDENCE_TAMPERED",
+                  "STATE_CONFLICT",
+                  "NOT_FOUND",
+                  "RATE_LIMITED",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "reason_code": {
+                "type": "string",
+                "description": "The specific cause within `code`, from a closed documented vocabulary. Branch on this, not on the message."
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {},
+              "request_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "AuthorizationDecision": {
+        "type": "object",
+        "required": [
+          "authorization_request_id",
+          "decision_id",
+          "receipt_id",
+          "decision",
+          "reason_code",
+          "failover_behavior",
+          "decision_timestamp"
+        ],
+        "properties": {
+          "authorization_request_id": {
+            "type": "string",
+            "example": "areq_01JBX7Q8N2K3M4P5R6S7T8V9W0"
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "receipt_id": {
+            "type": "string",
+            "description": "Evidence receipt covering this decision."
+          },
+          "approval_request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when the decision is ESCALATE. Submit approvals against it."
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "ALLOW",
+              "DENY",
+              "ESCALATE"
+            ]
+          },
+          "reason_code": {
+            "type": "string",
+            "example": "TREASURER_APPROVAL_REQUIRED"
+          },
+          "policy_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the canonical policy document the decision was made under."
+          },
+          "authority_lease_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk_signal_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "constraints_evaluated": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "constraint": {
+                  "type": "string"
+                },
+                "satisfied": {
+                  "type": "boolean"
+                },
+                "applicable": {
+                  "type": "boolean",
+                  "description": "False when the action carries no value for this dimension."
+                },
+                "limit": {},
+                "observed": {},
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "approval_requirement": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "required": {
+                "type": "boolean"
+              },
+              "quorum": {
+                "type": "integer"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "forbid_self_approval": {
+                "type": "boolean"
+              },
+              "ttl_seconds": {
+                "type": "integer"
+              }
+            }
+          },
+          "failover_behavior": {
+            "type": "string",
+            "enum": [
+              "FAIL_OPEN",
+              "FAIL_CLOSED",
+              "ESCALATE"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the execution grant lapses. Null unless the decision was ALLOW."
+          },
+          "decision_timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AuthorityGrant": {
+        "$ref": "#/definitions/AuthorityGrant",
+        "definitions": {
+          "AuthorityGrant": {
+            "type": "object",
+            "properties": {
+              "actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(?:\\*|[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?:\\.\\*)?)$"
+                },
+                "minItems": 1
+              },
+              "resources": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1
+                },
+                "propertyNames": {
+                  "minLength": 1
+                },
+                "default": {}
+              },
+              "constraints": {
+                "type": "object",
+                "properties": {
+                  "max_amount": {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "currencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "allowed_counterparties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "denied_counterparties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "allowed_destination_countries": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  }
+                },
+                "additionalProperties": false,
+                "default": {}
+              }
+            },
+            "required": [
+              "actions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": "A point in the authority lattice. `actions` and `resources` form the envelope -- what the agent is for -- and a request outside it is denied terminally. `constraints` are autonomy limits: exceeding one escalates to a human when policy names an approver, and is denied when it does not. An omitted resource type grants nothing for that type."
+      },
+      "Constraints": {
+        "$ref": "#/definitions/Constraints",
+        "definitions": {
+          "Constraints": {
+            "type": "object",
+            "properties": {
+              "max_amount": {
+                "type": "object",
+                "properties": {
+                  "currency": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3
+                  },
+                  "amountMinor": {
+                    "type": "string",
+                    "pattern": "^-?\\d+$"
+                  }
+                },
+                "required": [
+                  "currency",
+                  "amountMinor"
+                ],
+                "additionalProperties": false
+              },
+              "currencies": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              },
+              "allowed_counterparties": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              },
+              "denied_counterparties": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              },
+              "allowed_destination_countries": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "ApprovalRequirement": {
+        "$ref": "#/definitions/ApprovalRequirement",
+        "definitions": {
+          "ApprovalRequirement": {
+            "type": "object",
+            "properties": {
+              "required": {
+                "type": "boolean",
+                "default": true
+              },
+              "quorum": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "default": []
+              },
+              "forbid_self_approval": {
+                "type": "boolean",
+                "default": true
+              },
+              "ttl_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 86400,
+                "default": 3600
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "AuthorityEffect": {
+        "$ref": "#/definitions/AuthorityEffect",
+        "definitions": {
+          "AuthorityEffect": {
+            "type": "object",
+            "properties": {
+              "remove_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(?:\\*|[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?:\\.\\*)?)$"
+                },
+                "minItems": 1
+              },
+              "tighten": {
+                "type": "object",
+                "properties": {
+                  "max_amount": {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "currencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "allowed_counterparties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "denied_counterparties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  },
+                  "allowed_destination_countries": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  }
+                },
+                "additionalProperties": false
+              },
+              "duration_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2592000
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "PolicyRule": {
+        "$ref": "#/definitions/PolicyRule",
+        "definitions": {
+          "PolicyRule": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{2,63}$"
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "priority": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000,
+                "default": 100
+              },
+              "when": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "ALLOW",
+                      "DENY",
+                      "ESCALATE"
+                    ]
+                  },
+                  "reason_code": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+                  },
+                  "approval": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "quorum": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1
+                      },
+                      "roles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "default": []
+                      },
+                      "forbid_self_approval": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "ttl_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 86400,
+                        "default": 3600
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "authority_effect": {
+                    "type": "object",
+                    "properties": {
+                      "remove_actions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^(?:\\*|[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?:\\.\\*)?)$"
+                        },
+                        "minItems": 1
+                      },
+                      "tighten": {
+                        "type": "object",
+                        "properties": {
+                          "max_amount": {
+                            "type": "object",
+                            "properties": {
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3
+                              },
+                              "amountMinor": {
+                                "type": "string",
+                                "pattern": "^-?\\d+$"
+                              }
+                            },
+                            "required": [
+                              "currency",
+                              "amountMinor"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "currencies": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "minItems": 1
+                          },
+                          "allowed_counterparties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "minItems": 1
+                          },
+                          "denied_counterparties": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "minItems": 1
+                          },
+                          "allowed_destination_countries": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      "duration_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2592000
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "failure_mode": {
+                    "type": "string",
+                    "enum": [
+                      "FAIL_OPEN",
+                      "FAIL_CLOSED",
+                      "ESCALATE"
+                    ]
+                  }
+                },
+                "required": [
+                  "decision"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "when",
+              "then"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "PolicyMatcher": {
+        "$ref": "#/definitions/PolicyMatcher",
+        "definitions": {
+          "PolicyMatcher": {
+            "type": "object",
+            "properties": {
+              "eq": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "neq": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              },
+              "in": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": [
+                            "string",
+                            "number"
+                          ]
+                        },
+                        "currency": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 3
+                        }
+                      },
+                      "required": [
+                        "amount",
+                        "currency"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "currency": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 3
+                        },
+                        "amountMinor": {
+                          "type": "string",
+                          "pattern": "^-?\\d+$"
+                        }
+                      },
+                      "required": [
+                        "currency",
+                        "amountMinor"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "minItems": 1
+              },
+              "nin": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "amount": {
+                          "type": [
+                            "string",
+                            "number"
+                          ]
+                        },
+                        "currency": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 3
+                        }
+                      },
+                      "required": [
+                        "amount",
+                        "currency"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "currency": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 3
+                        },
+                        "amountMinor": {
+                          "type": "string",
+                          "pattern": "^-?\\d+$"
+                        }
+                      },
+                      "required": [
+                        "currency",
+                        "amountMinor"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "minItems": 1
+              },
+              "lt": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              "lte": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              "gt": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              "gte": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": [
+                      "number",
+                      "string"
+                    ]
+                  }
+                ]
+              },
+              "exists": {
+                "type": "boolean"
+              },
+              "prefix": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "CreateAgentRequest": {
+        "$ref": "#/definitions/CreateAgentRequest",
+        "definitions": {
+          "CreateAgentRequest": {
+            "type": "object",
+            "properties": {
+              "handle": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "owner_user_id": {
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {}
+              }
+            },
+            "required": [
+              "handle",
+              "display_name"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "AuthorizationRequest": {
+        "$ref": "#/definitions/AuthorizationRequest",
+        "definitions": {
+          "AuthorizationRequest": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "action": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "resource": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              "context": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {}
+              },
+              "authority_lease_id": {
+                "type": "string"
+              },
+              "nonce": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 128
+              },
+              "correlation_id": {
+                "type": "string",
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "agent_id",
+              "action",
+              "resource"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": "Money in `context` must be an exact decimal string plus a currency; a fractional JSON number is refused rather than compared. `counterparty_known` and `counterparty_status` are derived by the control plane from the tenant register and any caller-supplied value is discarded."
+      },
+      "CreateLeaseRequest": {
+        "$ref": "#/definitions/CreateLeaseRequest",
+        "definitions": {
+          "CreateLeaseRequest": {
+            "type": "object",
+            "properties": {
+              "agent_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "grant": {
+                "type": "object",
+                "properties": {
+                  "actions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(?:\\*|[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?:\\.\\*)?)$"
+                    },
+                    "minItems": 1
+                  },
+                  "resources": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    },
+                    "propertyNames": {
+                      "minLength": 1
+                    },
+                    "default": {}
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "properties": {
+                      "max_amount": {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "pattern": "^-?\\d+$"
+                          }
+                        },
+                        "required": [
+                          "currency",
+                          "amountMinor"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "currencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "allowed_counterparties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "denied_counterparties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "allowed_destination_countries": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      }
+                    },
+                    "additionalProperties": false,
+                    "default": {}
+                  }
+                },
+                "required": [
+                  "actions"
+                ],
+                "additionalProperties": false
+              },
+              "ttl_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 2592000
+              },
+              "revocable": {
+                "type": "boolean",
+                "default": true
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {}
+              }
+            },
+            "required": [
+              "agent_id",
+              "grant",
+              "ttl_seconds"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "RevokeLeaseRequest": {
+        "$ref": "#/definitions/RevokeLeaseRequest",
+        "definitions": {
+          "RevokeLeaseRequest": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 500
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "CreateDelegationRequest": {
+        "$ref": "#/definitions/CreateDelegationRequest",
+        "definitions": {
+          "CreateDelegationRequest": {
+            "type": "object",
+            "properties": {
+              "issuer_agent_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "delegate_agent_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parent_lease_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "grant": {
+                "type": "object",
+                "properties": {
+                  "actions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^(?:\\*|[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*(?:\\.\\*)?)$"
+                    },
+                    "minItems": 1
+                  },
+                  "resources": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1
+                    },
+                    "propertyNames": {
+                      "minLength": 1
+                    },
+                    "default": {}
+                  },
+                  "constraints": {
+                    "type": "object",
+                    "properties": {
+                      "max_amount": {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "pattern": "^-?\\d+$"
+                          }
+                        },
+                        "required": [
+                          "currency",
+                          "amountMinor"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "currencies": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "allowed_counterparties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "denied_counterparties": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      },
+                      "allowed_destination_countries": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1
+                      }
+                    },
+                    "additionalProperties": false,
+                    "default": {}
+                  }
+                },
+                "required": [
+                  "actions"
+                ],
+                "additionalProperties": false
+              },
+              "ttl_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 2592000
+              }
+            },
+            "required": [
+              "issuer_agent_id",
+              "delegate_agent_id",
+              "parent_lease_id",
+              "grant",
+              "ttl_seconds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": "The requested grant must be contained by the parent lease on every axis. A request that widens any axis is refused with DELEGATION_EXCEEDS_PARENT rather than silently clamped; only the lifetime is clamped, to the parent expiry and the policy maximum."
+      },
+      "IngestSignalRequest": {
+        "$ref": "#/definitions/IngestSignalRequest",
+        "definitions": {
+          "IngestSignalRequest": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "agent",
+                      "user",
+                      "organization",
+                      "resource",
+                      "counterparty"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              "signal_type": {
+                "type": "string",
+                "minLength": 3,
+                "maxLength": 64
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number"
+                ]
+              },
+              "confidence": {
+                "type": [
+                  "string",
+                  "number"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "ttl_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 86400
+              },
+              "issued_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "metadata": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {}
+              }
+            },
+            "required": [
+              "subject",
+              "signal_type",
+              "value",
+              "source",
+              "ttl_seconds"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "SubmitApprovalRequest": {
+        "$ref": "#/definitions/SubmitApprovalRequest",
+        "definitions": {
+          "SubmitApprovalRequest": {
+            "type": "object",
+            "properties": {
+              "approval_request_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "vote": {
+                "type": "string",
+                "enum": [
+                  "APPROVED",
+                  "REJECTED"
+                ]
+              },
+              "comment": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "approval_request_id",
+              "vote"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "RecordExecutionRequest": {
+        "$ref": "#/definitions/RecordExecutionRequest",
+        "definitions": {
+          "RecordExecutionRequest": {
+            "type": "object",
+            "properties": {
+              "decision_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "SUCCEEDED",
+                  "FAILED"
+                ]
+              },
+              "result": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {}
+              }
+            },
+            "required": [
+              "decision_id",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "CreatePolicyVersionRequest": {
+        "$ref": "#/definitions/CreatePolicyVersionRequest",
+        "definitions": {
+          "CreatePolicyVersionRequest": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                ]
+              },
+              "policy_key": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{2,63}$"
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "ReviewPolicyVersionRequest": {
+        "$ref": "#/definitions/ReviewPolicyVersionRequest",
+        "definitions": {
+          "ReviewPolicyVersionRequest": {
+            "type": "object",
+            "properties": {
+              "vote": {
+                "type": "string",
+                "enum": [
+                  "APPROVED",
+                  "REJECTED"
+                ]
+              },
+              "comment": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "vote"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "required": [
+          "id",
+          "seq",
+          "kind",
+          "payload_hash",
+          "previous_hash",
+          "hash"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "organization_id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "description": "Position in this tenant chain. Chains are per-tenant."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "AUTHORIZATION_DECISION",
+              "APPROVAL",
+              "EXECUTION",
+              "LEASE_ISSUED",
+              "LEASE_REVOKED",
+              "DELEGATION_CREATED",
+              "SIGNAL_INGESTED",
+              "POLICY_ACTIVATED"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          },
+          "payload_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "previous_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ed25519 over `hash`, base64url."
+          },
+          "signing_key_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "VerificationResult": {
+        "type": "object",
+        "properties": {
+          "receipt_id": {
+            "type": "string"
+          },
+          "integrity": {
+            "type": "string",
+            "enum": [
+              "INTACT",
+              "COMPROMISED"
+            ]
+          },
+          "attests": {
+            "type": "string",
+            "enum": [
+              "evidence_integrity_and_provenance"
+            ],
+            "description": "What the cryptography establishes: that this evidence is what was written, in the order it was written, by the holder of the signing key. It does not attest that the decision recorded was correct or lawful."
+          },
+          "receipt_verification": {
+            "type": "object"
+          },
+          "chain_verification": {
+            "type": "object"
+          }
+        }
+      },
+      "Explanation": {
+        "type": "object",
+        "description": "Assembled deterministically from the structured decision record. No language model is involved: the same decision always renders the same explanation.",
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "reason_code": {
+            "type": "string"
+          },
+          "headline": {
+            "type": "string"
+          },
+          "facts": {
+            "type": "object",
+            "description": "The five questions, kept separate rather than blended into prose.",
+            "properties": {
+              "what": {
+                "type": "string"
+              },
+              "authority": {
+                "type": "string"
+              },
+              "policy": {
+                "type": "string"
+              },
+              "signals": {
+                "type": "string"
+              },
+              "approvals": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              }
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "description": "Makes a retry safe. The key is claimed in the same transaction as the effect, so a duplicate replays the stored response rather than repeating the work. Reusing a key with a different body returns IDEMPOTENCY_CONFLICT."
+      },
+      "RequestId": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "description": "Correlation id echoed on the response and present on every log line for this request."
+      }
+    }
+  },
+  "paths": {
+    "/v1/agents": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Register a machine identity",
+        "description": "Requires the `admin:write` scope. An agent credential cannot create agents, including itself.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The agent was registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "List the agents in this tenant",
+        "responses": {
+          "200": {
+            "description": "Agents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/{id}": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Agent detail: identity, live authority, delegations, signals, recent decisions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Agent id or handle."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authority-leases": {
+      "post": {
+        "tags": [
+          "Authority"
+        ],
+        "summary": "Issue a scoped, time-bounded authority lease",
+        "description": "Requires `leases:write`. Authority is never a boolean permission: a lease is scoped to actions and resources, constrained, time-bounded, revocable and attributable to the policy version it was issued under.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLeaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The lease was issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authority-leases/{id}": {
+      "get": {
+        "tags": [
+          "Authority"
+        ],
+        "summary": "Read a lease and its full ancestry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lease and ancestry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authority-leases/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Authority"
+        ],
+        "summary": "Revoke a lease immediately",
+        "description": "Takes effect on the next decision, with no grace period and no cache to invalidate. Descendants of a revoked lease stop authorizing at the same instant, because the evaluator walks the ancestry on every decision.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeLeaseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The lease was revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/delegations": {
+      "post": {
+        "tags": [
+          "Authority"
+        ],
+        "summary": "Delegate a narrowed subset of held authority to another agent",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDelegationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The delegation was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The requested authority exceeds the parent. The response names the axis that failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authorization-requests": {
+      "post": {
+        "tags": [
+          "Authorization"
+        ],
+        "summary": "Submit an authorization request and evaluate it",
+        "description": "Creates the immutable request record and returns the decision. Historical requests are never mutated; a re-evaluation after approval produces a *new* decision that supersedes the escalation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request was evaluated. ALLOW, DENY and ESCALATE all return 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authorization/evaluate": {
+      "post": {
+        "tags": [
+          "Authorization"
+        ],
+        "summary": "Evaluate an authorization request (verb-shaped alias)",
+        "description": "Identical to POST /v1/authorization-requests, sharing one implementation. It exists because SDK callers reach for a verb rather than a resource.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request was evaluated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDecision"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/authorization-decisions/{id}": {
+      "get": {
+        "tags": [
+          "Authorization"
+        ],
+        "summary": "Why was this allowed, denied or escalated",
+        "description": "The full decision record: who, what, why, under which policy version and hash, under which authority, with which signals, with which approvals, with which constraints, and what happened. Machine-readable first; the attached explanation is assembled deterministically from the same facts.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The decision, its inputs and its explanation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "decision": {
+                      "$ref": "#/components/schemas/AuthorizationDecision"
+                    },
+                    "request": {
+                      "type": "object"
+                    },
+                    "approvals": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "receipt": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "execution": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "explanation": {
+                      "$ref": "#/components/schemas/Explanation"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/executions": {
+      "post": {
+        "tags": [
+          "Authorization"
+        ],
+        "summary": "Record an execution against an ALLOW decision",
+        "description": "An ALLOW is a single-use, time-boxed execution grant. Presenting it twice is a replay and is refused by a unique constraint, not by a check a race could slip past.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordExecutionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The execution was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/signals": {
+      "post": {
+        "tags": [
+          "Signals"
+        ],
+        "summary": "Publish a risk signal",
+        "description": "Scrutexity does not detect fraud or score anomalies. It consumes assertions from systems that do and turns them into authority consequences. Every signal carries a TTL and is simply not read once it lapses, so no stale assertion can suppress an agent's authority indefinitely. A newer assertion from the same source supersedes the older one.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestSignalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The signal was ingested.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approval-requests": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "List pending approval requests",
+        "responses": {
+          "200": {
+            "description": "Pending approvals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/approvals": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Record a human decision on an escalated action",
+        "description": "Requires a human principal and the `approvals:write` scope; an agent credential is refused. What is recorded is the person, the roles they actually held at that instant, and the requirement their authority satisfied. Recording an approval re-evaluates the original request and produces a superseding decision.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The approval was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/receipts/{id}": {
+      "get": {
+        "tags": [
+          "Evidence"
+        ],
+        "summary": "Read an evidence receipt",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "receipt": {
+                      "$ref": "#/components/schemas/Receipt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/receipts/{id}/verify": {
+      "post": {
+        "tags": [
+          "Evidence"
+        ],
+        "summary": "Verify a stored receipt and its chain segment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verification result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/receipts/verify": {
+      "post": {
+        "tags": [
+          "Evidence"
+        ],
+        "summary": "Verify a receipt supplied by the caller",
+        "description": "Verifies a receipt held outside the platform and reports whether it also matches the stored record. Use this when auditing an exported evidence bundle.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "receipt"
+                ],
+                "properties": {
+                  "receipt": {
+                    "$ref": "#/components/schemas/Receipt"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verification result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policy-versions": {
+      "post": {
+        "tags": [
+          "Policy"
+        ],
+        "summary": "Create an immutable policy version in DRAFT",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePolicyVersionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The policy version was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Policy"
+        ],
+        "summary": "List policy versions and their lifecycle state",
+        "responses": {
+          "200": {
+            "description": "Policy versions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policy-versions/{id}/reviews": {
+      "post": {
+        "tags": [
+          "Policy"
+        ],
+        "summary": "Review a policy version",
+        "description": "Dual control: two distinct humans, neither of them the author, must approve before a version can be activated. One rejection returns it to DRAFT.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewPolicyVersionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The review was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/policy-versions/{id}/activate": {
+      "post": {
+        "tags": [
+          "Policy"
+        ],
+        "summary": "Activate an approved policy version",
+        "description": "Deprecates the currently active version and takes effect for subsequent decisions. The document is re-hashed and checked against its recorded digest first.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version is now active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/overview": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Dashboard read model: agents, live authority, pending approvals, recent decisions, live signals",
+        "description": "One read model behind the dashboard, so the UI cannot disagree with the API about what happened.",
+        "responses": {
+          "200": {
+            "description": "Overview.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "security": [],
+        "summary": "Liveness",
+        "description": "Deliberately does not touch the database: a liveness probe that fails on a database blip restarts a healthy service.",
+        "responses": {
+          "200": {
+            "description": "The process is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "security": [],
+        "summary": "Readiness -- this instance can make decisions",
+        "responses": {
+          "200": {
+            "description": "Ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "security": [],
+        "summary": "Prometheus metrics",
+        "responses": {
+          "200": {
+            "description": "Metrics in Prometheus text format."
+          }
+        }
+      }
+    }
+  },
+  "x-action-catalog": {
+    "description": "Actions are a closed vocabulary, so a typo cannot become a bypass and a money-bearing action can never reach the decision point without an amount.",
+    "actions": [
+      "account.read",
+      "counterparty.read",
+      "statement.read",
+      "wire.create",
+      "wire.execute",
+      "wire.modify",
+      "wire.read",
+      "wire.submit"
+    ]
+  }
+}

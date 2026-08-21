@@ -1,0 +1,662 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.scrutexity.dev/policy/v1.json",
+  "title": "Scrutexity policy document (v1)",
+  "$ref": "#/definitions/ScrutexityPolicyDocument",
+  "definitions": {
+    "ScrutexityPolicyDocument": {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "const": "scrutexity.dev/policy/v1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{2,63}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Semver. A version is immutable once activated."
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": {
+              "type": "string",
+              "maxLength": 2000
+            },
+            "owner": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 50
+              },
+              "maxItems": 20,
+              "default": []
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "additionalProperties": false
+        },
+        "defaults": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "ALLOW",
+                "DENY",
+                "ESCALATE"
+              ],
+              "default": "DENY"
+            },
+            "reason_code": {
+              "type": "string",
+              "default": "NO_RULE_MATCHED"
+            },
+            "execution_grant_ttl_seconds": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 86400,
+              "default": 300
+            }
+          },
+          "additionalProperties": false
+        },
+        "failure_modes": {
+          "type": "object",
+          "properties": {
+            "policy_unavailable": {
+              "type": "string",
+              "enum": [
+                "FAIL_OPEN",
+                "FAIL_CLOSED",
+                "ESCALATE"
+              ],
+              "default": "FAIL_CLOSED"
+            },
+            "signal_unavailable": {
+              "type": "string",
+              "enum": [
+                "FAIL_OPEN",
+                "FAIL_CLOSED",
+                "ESCALATE"
+              ],
+              "default": "FAIL_CLOSED"
+            },
+            "enforcement_unavailable": {
+              "type": "string",
+              "enum": [
+                "FAIL_OPEN",
+                "FAIL_CLOSED",
+                "ESCALATE"
+              ],
+              "default": "FAIL_CLOSED"
+            }
+          },
+          "additionalProperties": false
+        },
+        "delegation": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "max_depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5,
+              "default": 2
+            },
+            "max_ttl_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 2592000,
+              "default": 3600
+            },
+            "non_delegable_actions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          },
+          "additionalProperties": false
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{2,63}$"
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "priority": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000,
+                "default": 100,
+                "description": "Lower evaluates first. Every rule is evaluated; the strictest matched decision wins."
+              },
+              "when": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "eq": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "neq": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "in": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount": {
+                                    "type": [
+                                      "string",
+                                      "number"
+                                    ],
+                                    "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 3,
+                                    "description": "ISO 4217 code"
+                                  }
+                                },
+                                "required": [
+                                  "amount",
+                                  "currency"
+                                ],
+                                "additionalProperties": false,
+                                "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                              }
+                            ]
+                          },
+                          "minItems": 1
+                        },
+                        "nin": {
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount": {
+                                    "type": [
+                                      "string",
+                                      "number"
+                                    ],
+                                    "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 3,
+                                    "description": "ISO 4217 code"
+                                  }
+                                },
+                                "required": [
+                                  "amount",
+                                  "currency"
+                                ],
+                                "additionalProperties": false,
+                                "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                              }
+                            ]
+                          },
+                          "minItems": 1
+                        },
+                        "lt": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "lte": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "gt": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "gte": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "amount": {
+                                  "type": [
+                                    "string",
+                                    "number"
+                                  ],
+                                  "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                                },
+                                "currency": {
+                                  "type": "string",
+                                  "minLength": 3,
+                                  "maxLength": 3,
+                                  "description": "ISO 4217 code"
+                                }
+                              },
+                              "required": [
+                                "amount",
+                                "currency"
+                              ],
+                              "additionalProperties": false,
+                              "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                            }
+                          ]
+                        },
+                        "exists": {
+                          "type": "boolean"
+                        },
+                        "prefix": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "Every declared operator must hold. There is no expression language."
+                    },
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "amount": {
+                              "type": [
+                                "string",
+                                "number"
+                              ],
+                              "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                            },
+                            "currency": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 3,
+                              "description": "ISO 4217 code"
+                            }
+                          },
+                          "required": [
+                            "amount",
+                            "currency"
+                          ],
+                          "additionalProperties": false,
+                          "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                        }
+                      ]
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "amount": {
+                                "type": [
+                                  "string",
+                                  "number"
+                                ],
+                                "description": "Major-unit amount, e.g. \"50000\" or \"50000.00\""
+                              },
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3,
+                                "description": "ISO 4217 code"
+                              }
+                            },
+                            "required": [
+                              "amount",
+                              "currency"
+                            ],
+                            "additionalProperties": false,
+                            "description": "An exact monetary amount. Fractional values must be strings to stay exact."
+                          }
+                        ]
+                      }
+                    },
+                    {}
+                  ]
+                },
+                "description": "Selector -> matcher, combined with implicit AND. `all_of`, `any_of` and `not` take nested conditions. Selectors are a closed vocabulary: action, resource.type, resource.id, resource.attributes.*, agent.id, agent.handle, context.*, authority.present, authority.lease_id, authority.depth, signal.<type>.<agent|resource|counterparty|organization>[.value|.confidence]."
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "decision": {
+                    "type": "string",
+                    "enum": [
+                      "ALLOW",
+                      "DENY",
+                      "ESCALATE"
+                    ]
+                  },
+                  "reason_code": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+                  },
+                  "approval": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "quorum": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1
+                      },
+                      "roles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "default": []
+                      },
+                      "forbid_self_approval": {
+                        "type": "boolean",
+                        "default": true
+                      },
+                      "ttl_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 86400,
+                        "default": 3600
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "Required when decision is ESCALATE. Merged across matched rules in the stricter direction."
+                  },
+                  "authority_effect": {
+                    "type": "object",
+                    "properties": {
+                      "remove_actions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "minItems": 1
+                      },
+                      "tighten": {
+                        "type": "object",
+                        "additionalProperties": {}
+                      },
+                      "duration_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2592000
+                      }
+                    },
+                    "additionalProperties": false,
+                    "description": "Authority decay. Narrows what the agent may do unattended; never widens, never changes its role."
+                  },
+                  "failure_mode": {
+                    "type": "string",
+                    "enum": [
+                      "FAIL_OPEN",
+                      "FAIL_CLOSED",
+                      "ESCALATE"
+                    ]
+                  }
+                },
+                "required": [
+                  "decision"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "when",
+              "then"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 500
+        }
+      },
+      "required": [
+        "apiVersion",
+        "id",
+        "version",
+        "metadata",
+        "rules"
+      ],
+      "additionalProperties": false,
+      "description": "A Scrutexity policy document. Data, never code."
+    }
+  }
+}

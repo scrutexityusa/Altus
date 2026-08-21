@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_ADMIN_URL: postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity
+  DATABASE_URL: postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity
+
+jobs:
+  # The pure domain has no dependencies at all, so it runs first and fails
+  # fast. If the authority lattice is broken, nothing else is worth running.
+  core:
+    name: Core (no database)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm exec tsc -b tsconfig.build.json
+      - name: Formatting
+        run: pnpm exec prettier --check .
+      - name: Published contracts match the code
+        run: pnpm exec tsx scripts/generate-specs.ts --check
+      - name: Unit and invariant tests
+        run: pnpm exec vitest run packages
+
+  integration:
+    name: Integration, security and demo
+    runs-on: ubuntu-latest
+    needs: core
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: scrutexity_owner
+          POSTGRES_PASSWORD: scrutexity
+          POSTGRES_DB: scrutexity
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U scrutexity_owner"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Create the non-owner application role
+        run: |
+          PGPASSWORD=scrutexity psql -h 127.0.0.1 -U scrutexity_owner -d scrutexity \
+            -v ON_ERROR_STOP=1 -f db/init/00-roles.sql
+
+      - name: Migrate
+        run: pnpm exec tsx scripts/migrate.ts
+
+      # No build step here on purpose: vitest aliases the workspace packages to
+      # their TypeScript source, so the suite is hermetic and can never pass
+      # against a stale dist.
+      - name: Integration, security and contract tests
+        run: pnpm exec vitest run services spec
+
+      # The demo scripts import @scrutexity/core through its package entry
+      # point, exactly as the container image does, so they need the compiled
+      # output that the tests deliberately bypass.
+      - name: Build the workspace packages
+        run: pnpm exec tsc -b tsconfig.build.json
+
+      # The demo is a test. It runs from a clean database and asserts every
+      # scene, so "the demo still works" is a build result, not a claim.
+      - name: Treasury demo, from a clean database
+        run: NO_COLOR=1 pnpm exec tsx scripts/demo.ts
+
+  build:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the control plane image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
