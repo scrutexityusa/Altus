@@ -1,18 +1,20 @@
-# 60-day plan
+# Delivery plan
 
-Five two-week sprints. Sprints 1–4 are **delivered** in this repository;
-Sprint 5 is partially delivered and the remainder is scoped below. Each sprint
-has a definition of done that is checkable, not narrative.
+Seven two-week sprints. Sprints 1–6 are **delivered** in this repository;
+Sprint 7 is scoped below. Each sprint has a definition of done that is
+checkable, not narrative.
 
 ## Status
 
-| Sprint | Focus                                                           | State                                                       |
-| ------ | --------------------------------------------------------------- | ----------------------------------------------------------- |
-| 1      | Repository reset, domain model, schema, contracts, threat model | ✅ Delivered                                                |
-| 2      | Identity and core authorization                                 | ✅ Delivered                                                |
-| 3      | Treasury wire demo, no UI                                       | ✅ Delivered                                                |
-| 4      | Evidence, signals, delegation                                   | ✅ Delivered                                                |
-| 5      | UI, SDK, hardening                                              | ◑ SDK and dashboard delivered; hardening items listed below |
+| Sprint | Focus                                                           | State          |
+| ------ | --------------------------------------------------------------- | -------------- |
+| 1      | Repository reset, domain model, schema, contracts, threat model | ✅ Delivered   |
+| 2      | Identity and core authorization                                 | ✅ Delivered   |
+| 3      | Treasury wire demo, no UI                                       | ✅ Delivered   |
+| 4      | Evidence, signals, delegation                                   | ✅ Delivered   |
+| 5      | UI, SDK, hardening                                              | ✅ Delivered   |
+| 6      | Causal evidence, corrective handshake, single-use grants        | ✅ Delivered   |
+| 7      | Hardening for a design partner                                  | ◑ Scoped below |
 
 ---
 
@@ -73,39 +75,95 @@ the deterministic explanation compiler.
 
 ## Sprint 5 — UI, SDK, hardening
 
-**Delivered:** `packages/sdk`; the dashboard (`apps/web`) over the API's own
-read model; 199 tests; `make demo` green from a clean checkout; CI.
+**Delivered.** `packages/sdk`; the dashboard (`apps/web`) over the API's own
+read model; `make demo` green from a clean checkout; CI.
 
-**Remaining, in priority order:**
+**Done when** — all met:
+
+- [x] Dashboard renders the API's read model and nothing of its own
+- [x] SDK makes the safe path the easy one: only ALLOW truthy, `guard()`
+- [x] Security suite runs the threat model against the real service
+- [x] `make demo` green from a clean database
+
+---
+
+## Sprint 6 — Causal evidence and the corrective handshake
+
+**Delivered.**
+
+- **Single-use, purpose-bound grants** (ADR-0013). `CREATED → CLAIMED → USED`,
+  spent on claim rather than on execution, enforced by a per-agent advisory
+  lock, a guarded UPDATE and CHECK constraints. Ten concurrent requests against
+  one grant yield exactly one ALLOW.
+- **Approval-to-execution binding.** Decisions are fingerprinted over every
+  input they rest on; execution recomputes and refuses on divergence with
+  `APPROVAL_CONTEXT_MISMATCH` or `CONTEXT_CHANGED`.
+- **Intent binding.** Policies declare intents, requests declare one, and the
+  engine returns a structured `intent_evaluation`, denying terminally on
+  mismatch.
+- **The corrective handshake** (ADR-0011). Typed, policy-derived next steps on
+  a refusal; hard violations return nothing; payloads carry no policy internals.
+- **Signal authentication** (ADR-0014). Ed25519 and HMAC, per-source keys,
+  rotation with a grace period, replay refused on `(source, event_id)`, and a
+  security event for every rejection.
+- **Root-cause trace** (ADR-0012). `GET /v1/trace/{id}` in causal order, with
+  typed edges and a named root cause.
+- **Infrastructure.** Per-run test databases, down migrations throughout,
+  `tsconfig.test.json`, and `scripts/ci-verify.sh`.
+
+**Done when** — all met:
+
+- [x] 290 tests pass, including 10-way concurrency against one single-use grant
+- [x] Every migration rolls back and reapplies, verified in CI
+- [x] The test suite provisions and drops its own database
+- [x] Sources _and_ tests typecheck
+- [x] Every new endpoint is in the OpenAPI document, drift-checked in CI
+- [x] An ADR exists for each architectural change
+- [x] `scripts/ci-verify.sh` passes from a clean tree
+
+---
+
+## Sprint 7 — Hardening for a design partner
+
+In priority order. The first two are the ones that would embarrass us in a
+security review.
 
 1. **Evidence anchoring** (2d). Publish periodic chain head hashes to an
-   external witness. Closes the one residual gap in ADR-0006 — currently an
-   attacker with both the database and the signing key can rewrite history
+   external witness. Closes the residual gap in ADR-0006 — today an attacker
+   holding both the database and the signing key can rewrite history
    undetectably from inside.
-2. **Tenant-extensible action catalog** (3d). Move `ACTION_CATALOG` to a
+2. **HMAC secret encryption at rest** (2d). `signal_signing_keys.key_material`
+   holds HMAC secrets in plaintext. Envelope-encrypt with a key held outside
+   the database, or drop HMAC in favour of Ed25519 only. Flagged in
+   `0005_signal_authentication.sql`; must not reach a real tenant as is.
+3. **Tenant-extensible action catalog** (3d). Move `ACTION_CATALOG` to a
    tenant-scoped table with a cache. Blocks the second vertical (ADR-0007).
-3. **Credential lifecycle** (2d). Rotation, expiry enforcement, per-credential
-   scope editing, and a revocation endpoint. Today credentials are seeded.
-4. **Rate limiting and quotas** (2d). Per-credential and per-tenant, at the
-   edge.
-5. **Concurrency tests** (2d). Parallel evaluations against one lease; racing
-   revocation against evaluation; concurrent receipt appends asserting no chain
-   fork. The locking is in place; the proof is not.
-6. **Load characterisation** (2d). Establish p50/p95/p99 for
+4. **Credential lifecycle** (2d). Rotation, expiry enforcement, per-credential
+   scope editing, revocation endpoint. Credentials are seeded today.
+5. **Python SDK** (3d). The TypeScript SDK ships; most agent runtimes are
+   Python. Same semantics: only ALLOW truthy, `guard()`, corrective actions,
+   local receipt verification.
+6. **Rate limiting and quotas** (2d). Per-credential and per-tenant, at the edge.
+7. **Load characterisation** (2d). p50/p95/p99 for
    `/v1/authorization/evaluate` under realistic lease and signal cardinality.
-   `evaluation_duration_us` is already recorded per decision; nothing has been
-   measured under load, and no latency claim should be made until it is.
-7. **Per-currency ceilings** (2d). Removes the one-lease-per-currency
-   limitation in `docs/domain-model.md`.
-8. **Evidence bundle export** (3d). Signed, portable archive of a decision and
-   its chain segment for an external auditor.
+   `evaluation_duration_us` is recorded per decision; nothing has been measured
+   under load, and no latency claim should be made until it is.
+8. **Per-currency ceilings** (2d). Removes the one-lease-per-currency limitation
+   in `docs/domain-model.md`.
+9. **Evidence bundle export** (3d). Signed, portable archive of a decision, its
+   trace and its chain segment, for an external auditor.
+10. **Context-fingerprint tuning** (2d). Any change in the live signal set
+    invalidates an unused grant today, including a signal expiring naturally.
+    That is the safe direction and it will cause avoidable re-evaluations; the
+    fix is a policy-controlled sensitivity setting, not a weaker default.
 
 **Done when:**
 
 - [ ] Chain heads are anchored externally and verification reports anchor status
+- [ ] No secret is stored in plaintext anywhere in the schema
 - [ ] A tenant can add an action without a deploy
 - [ ] Credentials can be rotated and revoked through the API
-- [ ] Concurrency tests pass under parallel load
+- [ ] A Python agent can complete the full handshake
 - [ ] p50/p95/p99 measured and published as internal engineering targets
 
 ---
@@ -122,7 +180,12 @@ In dependency order, not priority order:
   what to whom". The linear explanation ships first, deliberately.
 - **Policy simulation.** Replay the last N decisions against a draft policy
   version and diff the outcomes, before activation. Cheap, given that
-  evaluation is a pure function — arguably the highest-value item on this list.
+  evaluation is a pure function, and now cheaper still: the decision record
+  carries its full context fingerprint and request context, so a replay needs no
+  second lookup. Arguably the highest-value item on this list.
+- **Authority graph visualisation.** The trace API (ADR-0012) already returns
+  the graph in causal order with typed edges; rendering it is presentation
+  work over an interface that exists.
 - **OpenFGA for relationship modelling**, when resource hierarchies outgrow the
   lattice (ADR-0002).
 - **Durable workflow**, when approval acquires reminder ladders and timed

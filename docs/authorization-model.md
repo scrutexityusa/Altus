@@ -17,10 +17,17 @@ each dependency. Nothing else influences the result.
 0. Dependency health   policy unreadable → system default FAIL_CLOSED, recorded
 1. Policy              every rule evaluated; strictest matched decision wins
 2. Authority envelope  actions × resources on the *base* grant → terminal on failure
+2b. Intent             declared intent vs attempted action → terminal on failure
 3. Autonomy            constraints on the *decayed* grant → escalatable on failure
 4. Approval            prior approvals resolve an escalation into ALLOW or DENY
 5. Degradation         signal or enforcement unavailable → policy's failure mode
 ```
+
+Intent is checked _ahead_ of the envelope: "you were not sent to do this" is a
+more specific statement than "you cannot do this", and no approval turns one
+task into another. See `docs/security-model.md` for the model, and ADR-0013 for
+how a purpose-bound grant binds even under a policy that does not enforce
+intent.
 
 ## 1. Policy evaluation
 
@@ -183,3 +190,10 @@ or until consumed, whichever is first. That is deliberate: an execution grant
 is a promise the agent may have already acted on. To cut that short too,
 revoke and let the grant expire — or shorten
 `defaults.execution_grant_ttl_seconds` in policy.
+
+There is a second, sharper bound. Execution recomputes the decision's context
+fingerprint and refuses if it has moved, so a revocation that changes nothing
+else will still not invalidate an outstanding grant — but a _risk signal_
+arriving after the decision will. In practice the window during which a stale
+ALLOW can be used is bounded by the grant TTL and by the stability of the risk
+picture, whichever gives out first.

@@ -27,8 +27,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Typecheck
-        run: pnpm exec tsc -b tsconfig.build.json
+      - name: Typecheck (sources and tests)
+        # tsconfig.build.json excludes test files, so they get their own pass.
+        # Without it a test can drift from the types it exercises and still
+        # run, because the runner strips types rather than checking them.
+        run: pnpm run typecheck
       - name: Formatting
         run: pnpm exec prettier --check .
       - name: Published contracts match the code
@@ -67,8 +70,19 @@ jobs:
           PGPASSWORD=scrutexity psql -h 127.0.0.1 -U scrutexity_owner -d scrutexity \
             -v ON_ERROR_STOP=1 -f db/init/00-roles.sql
 
+      # The suite provisions and drops its own database per run (see
+      # test/global-setup.ts), so this only proves the cluster is reachable and
+      # the migrations apply.
       - name: Migrate
         run: pnpm exec tsx scripts/migrate.ts
+
+      - name: Migrations roll back and reapply
+        # A migration without a working down migration is a one-way door.
+        # Proving the round trip here means nobody discovers that during an
+        # incident.
+        run: |
+          pnpm exec tsx scripts/migrate.ts --down 3
+          pnpm exec tsx scripts/migrate.ts
 
       # No build step here on purpose: vitest aliases the workspace packages to
       # their TypeScript source, so the suite is hermetic and can never pass

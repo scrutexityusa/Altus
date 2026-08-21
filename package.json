@@ -10,7 +10,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --filter=!@scrutexity/web build",
+    "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -b tsconfig.build.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:unit": "vitest run packages",
@@ -23,7 +23,8 @@
     "db:reset": "tsx scripts/migrate.ts --reset",
     "seed": "tsx scripts/seed.ts",
     "demo": "tsx scripts/demo.ts",
-    "dev:api": "tsx watch services/api/src/server.ts"
+    "dev:api": "tsx watch services/api/src/server.ts",
+    "verify": "bash scripts/ci-verify.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -59,7 +59,7 @@ make ci       # everything CI runs
 
 ---
 
-## The three ideas
+## The five ideas
 
 ### 1. Authority is an object, not a boolean
 
@@ -91,7 +91,31 @@ A fraud signal narrows autonomy, never the envelope — which is why the same
 wire escalates rather than reading as a broken integration. See
 [ADR-0008](docs/decisions/0008-escalation-boundary.md).
 
-### 3. Decisions are pure, so evidence means something
+### 3. A refusal carries the next step
+
+A denial that only says "no" leaves an agent guessing, and guessing looks
+exactly like probing. So a refusal carries the next legitimate step —
+`REQUEST_DELEGATION` addressed to the agent that can grant it, `REQUEST_LEASE`
+with the minimal grant, `HUMAN_ESCALATION` with the approval already open.
+
+Computed by the policy engine from the same facts that produced the refusal,
+never generated. Hard violations return nothing, and payloads carry no
+threshold, rule id, or the value that would have passed — an agent cannot
+binary-search a policy by reading its own denials. See
+[ADR-0011](docs/decisions/0011-corrective-handshake.md).
+
+### 4. Every decision can be walked back to its origin
+
+`GET /v1/trace/{decision_id}` returns the causal chain, oldest cause first: the
+policy activation that admitted the authority, the lease it produced, the
+delegation that narrowed it, the request, the signals that were read, the
+humans who approved, the decision, and what was done with it. Each node carries
+a timestamp and a typed causal edge.
+
+A database traversal over a graph the schema has encoded since the first
+migration. Nothing summarised, nothing generated, same answer every time.
+
+### 5. Decisions are pure, so evidence means something
 
 `evaluateAuthorization(snapshot) → decision` reads no clock, opens no
 connection, consults no global. Everything it depends on arrives as data, and
@@ -148,14 +172,19 @@ be mistaken for a soft yes.
 
 ## Testing
 
-206 tests, and the ones that matter most are the invariants:
+290 tests. `./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with
+no build output and no dependencies installed.
+
+The ones that matter most are the invariants:
 
 ```
 child authority never exceeds parent authority     4,000 randomised proposals
 anything a child covers, its parent covers         3,000 randomised pairs
 authority decay only ever shrinks                  2,000 randomised restrictions
 no ALLOW without autonomous covering authority     2,000 randomised evaluations
-identical inputs produce identical decisions         300 randomised requests
+identical inputs produce identical decisions          300 randomised requests
+a signal can never move a decision towards yes         18 action/value pairs
+exactly one winner among ten concurrent claimants   a real race, real database
 ```
 
 The security suite runs the attacks from the threat model against the real

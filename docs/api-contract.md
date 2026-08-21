@@ -78,6 +78,9 @@ SDK callers reach for a verb rather than a resource.
 
 - `action` must be in the catalog (`x-action-catalog` in the spec). A typo is a
   `400`, never a rule that silently never matches.
+- `declared_intent` states what the agent is doing. It is matched against the
+  intents the policy declares and against the purpose of any purpose-bound
+  grant; a mismatch is a terminal `INTENT_MISMATCH`.
 - `amount` is an exact decimal **string** with a currency. A fractional JSON
   number is refused rather than compared.
 - `counterparty_known` and `counterparty_status` are **server-derived**. Send
@@ -123,6 +126,44 @@ SDK callers reach for a verb rather than a resource.
 ```
 
 `expires_at` is non-null only for ALLOW: it is the execution grant's lifetime.
+
+Three further fields appear on every decision:
+
+- **`intent_evaluation`** — the structured verdict on declared intent versus
+  attempted action. Never prose; the explanation compiler renders this same
+  data as text.
+
+  ```json
+  {
+    "declared_intent": "reconcile_cash_position",
+    "attempted_action": "wire.execute",
+    "match": false,
+    "reason": "action_in_forbidden_list",
+    "policy_intent_id": "reconcile_cash_position",
+    "lease_purpose": null
+  }
+  ```
+
+- **`corrective_actions`** — the next legitimate step, when one exists.
+  Computed by the policy engine from the same facts that produced the refusal
+  (ADR-0011). Empty for an ALLOW, and empty for a hard violation, because
+  offering a step would imply one exists. Payloads never carry a threshold, a
+  rule id, or the value that would have passed.
+
+  ```json
+  [
+    {
+      "type": "REQUEST_DELEGATION",
+      "reason": "authority_does_not_cover_action",
+      "target_agent": "treasury-agent",
+      "payload": { "grant": { "actions": ["wire.execute"] }, "ttl_seconds": 600 }
+    }
+  ]
+  ```
+
+- **`context_hash`** — a fingerprint of every input the decision rests on.
+  Recomputed at execution; if it has moved, the action is refused rather than
+  reconciled. See `docs/security-model.md`.
 
 ## Error taxonomy
 
@@ -202,6 +243,39 @@ const { decision, result } = await scrutexity.guard(
 if (decision.requiresApproval) {
   notifyTreasurer(decision.approvalRequestId);
 }
+```
+
+### The corrective handshake
+
+A refusal carries the next legitimate step, so an agent negotiates rather than
+guesses:
+
+```ts
+const decision = await scrutexity.authorize({
+  agentId: 'verification-agent',
+  action: 'counterparty.read',
+  resource: 'counterparty:cp_102',
+  declaredIntent: 'verify_counterparties',
+});
+
+if (!decision.allowed) {
+  for (const action of decision.correctiveActions()) {
+    // REQUEST_LEASE and REQUEST_DELEGATION are machine-actionable.
+    // HUMAN_ESCALATION and DECLARE_INTENT are not, and say so.
+    const { followed } = await scrutexity.follow(action);
+    if (!followed && action.type === 'HUMAN_ESCALATION') {
+      notifyApprovers(action.payload);
+    }
+  }
+}
+```
+
+### The root-cause trace
+
+```ts
+const { trace, root_cause, complete } = await scrutexity.trace(decision.decisionId);
+// trace[0] is the policy activation that admitted the authority;
+// each node carries causal_parent_id and causal_link_type.
 ```
 
 Only `ALLOW` is truthy. `requiresApproval` and `denied` are both falsy for
