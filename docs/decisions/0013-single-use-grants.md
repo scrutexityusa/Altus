@@ -84,6 +84,39 @@ retry path for any agent that wants to be resilient, and the corrective
 handshake returns `REQUEST_LEASE / single_use_grant_already_spent` precisely so
 that path is a named step rather than a guess.
 
+## The three outcomes of a claim, and how to tell them apart
+
+A claim is terminal, so "can I retry?" has to be answerable from evidence
+rather than from optimism. A claimed single-use grant is in exactly one of
+three states, and `GET /v1/authority-leases/:id` reports which:
+
+| `grant_state` | `execution_outcome` | What happened                                               |
+| ------------- | ------------------- | ----------------------------------------------------------- |
+| `CLAIMED`     | `null`              | The agent was authorised and never came back.               |
+| `USED`        | `SUCCEEDED`         | The operation was attempted and the agent reported success. |
+| `USED`        | `FAILED`            | The operation was attempted and the agent reported failure. |
+
+A `FAILED` execution spends the grant exactly as a `SUCCEEDED` one does.
+Anything else would let a caller manufacture a retry by reporting its own
+failure, which makes the authority reusable by an agent that is willing to lie.
+Authority is consumed by the attempt, not by the attempt working.
+
+The honest limit: `FAILED` is what the agent _said_, and it conflates "the
+transfer definitely did not happen" with "the bank API timed out and I do not
+know". `CLAIMED` with no execution is the same ambiguity in a worse form —
+nobody reported anything at all. In both cases the safe answer is the same
+(the grant is gone; issue a new one under a fresh decision), but neither state
+tells an operator whether money moved. Only the external system knows that.
+
+Closing that gap means a `CREATED → CLAIMED → EXECUTING → SUCCEEDED/FAILED`
+lifecycle in which the enforcement boundary — not the agent — records
+`EXECUTING` before it contacts the external system, and a reconciliation pass
+resolves whatever is left in `EXECUTING` after a crash. That belongs with the
+execution adapter, because it is only truthful if the thing writing the state
+is the thing making the call. Until then the states above are the whole of
+what the system honestly knows, and they are surfaced rather than inferred so
+that no operator has to reconstruct them from a join.
+
 ## Revisit when
 
 Operators need a claimed-but-unexecuted grant released early, rather than

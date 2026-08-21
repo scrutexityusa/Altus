@@ -1,6 +1,7 @@
 import {
   ScrutexityError,
   explainDecision,
+  grantState,
   hashObject,
   loadPolicyDocument,
   loadPolicyYaml,
@@ -252,9 +253,37 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       );
       if (result.rowCount === 0)
         throw new ScrutexityError('NOT_FOUND', 'authority lease not found');
+      const now = new Date();
       const rows = (result.rows as LeaseRow[]).map(toLease);
       const lease = rows.find((l) => l.id === request.params.id)!;
-      return { authority_lease: lease, ancestry: rows };
+
+      // Whether a claimed grant was ever acted on is not derivable from the
+      // lease row alone: a claim with no execution behind it means the agent
+      // never came back. Surfaced here so an operator does not have to join it
+      // by hand -- see ADR-0013 on why that state is deliberately terminal.
+      const execution = await client.query(
+        `SELECT e.id, e.status, e.created_at
+           FROM scrutexity.execution_attempts e
+           JOIN scrutexity.authorization_decisions d ON d.id = e.decision_id
+          WHERE d.authority_lease_id = $1
+          ORDER BY e.created_at DESC LIMIT 1`,
+        [lease.id],
+      );
+
+      return {
+        authority_lease: {
+          ...lease,
+          grant_state: grantState(lease, now),
+          execution_outcome: execution.rows[0]
+            ? {
+                execution_id: execution.rows[0].id,
+                status: execution.rows[0].status,
+                recorded_at: (execution.rows[0].created_at as Date).toISOString(),
+              }
+            : null,
+        },
+        ancestry: rows.map((l) => ({ ...l, grant_state: grantState(l, now) })),
+      };
     }),
   );
 

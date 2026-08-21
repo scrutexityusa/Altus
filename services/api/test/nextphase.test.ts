@@ -874,3 +874,92 @@ describe('cascading revocation', () => {
     expect(after.body.reason_code).toBe('AUTHORITY_REVOKED');
   });
 });
+
+describe('grant outcome is observable', () => {
+  /**
+   * A spent grant is terminal, so the only honest answer to "can I retry?" is
+   * one the operator can look up. These three cases are the whole state space
+   * a claimed single-use grant can be in, and each must read differently.
+   */
+  it('distinguishes a claim the agent never came back from', async () => {
+    const grant = await issueSingleUseGrant();
+    await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ authority_lease_id: grant.id, nonce: 'nextphase-outcome-crash' }),
+    );
+
+    // No execution was ever recorded: the agent claimed the grant and then
+    // died. The authority is gone, but nothing was necessarily done with it.
+    const lease = await h.call(
+      'GET',
+      `/v1/authority-leases/${grant.id}`,
+      h.tenant.tokens['admin']!,
+    );
+    expect(lease.body.authority_lease.grant_state).toBe('CLAIMED');
+    expect(lease.body.authority_lease.consumed).toBe(false);
+    expect(lease.body.authority_lease.execution_outcome).toBeNull();
+  });
+
+  it('distinguishes a failed execution from a successful one', async () => {
+    const failing = await issueSingleUseGrant();
+    const failedDecision = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ authority_lease_id: failing.id, nonce: 'nextphase-outcome-failed' }),
+    );
+    const failedExecution = await h.call(
+      'POST',
+      '/v1/executions',
+      h.tenant.tokens['treasury_agent']!,
+      {
+        decision_id: failedDecision.body.decision_id,
+        status: 'FAILED',
+        result: { error: 'bank api returned 500' },
+      },
+    );
+    expect(failedExecution.status).toBe(201);
+
+    const failedLease = await h.call(
+      'GET',
+      `/v1/authority-leases/${failing.id}`,
+      h.tenant.tokens['admin']!,
+    );
+    // A failure spends the grant exactly as a success does. Authority is
+    // consumed by the attempt, not by the attempt working -- anything else
+    // would let a caller retry by reporting its own failure.
+    expect(failedLease.body.authority_lease.grant_state).toBe('USED');
+    expect(failedLease.body.authority_lease.consumed).toBe(true);
+    expect(failedLease.body.authority_lease.execution_outcome.status).toBe('FAILED');
+
+    const succeeding = await issueSingleUseGrant();
+    const okDecision = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ authority_lease_id: succeeding.id, nonce: 'nextphase-outcome-ok' }),
+    );
+    await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
+      decision_id: okDecision.body.decision_id,
+      status: 'SUCCEEDED',
+    });
+
+    const okLease = await h.call(
+      'GET',
+      `/v1/authority-leases/${succeeding.id}`,
+      h.tenant.tokens['admin']!,
+    );
+    expect(okLease.body.authority_lease.grant_state).toBe('USED');
+    expect(okLease.body.authority_lease.execution_outcome.status).toBe('SUCCEEDED');
+    expect(okLease.body.authority_lease.execution_outcome.execution_id).toBeTruthy();
+  });
+
+  it('reports a reusable lease as CREATED regardless of how often it is used', async () => {
+    const lease = await issueTreasuryLease(h);
+    await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ authority_lease_id: lease.id, nonce: 'nextphase-outcome-reusable' }),
+    );
+    const read = await h.call('GET', `/v1/authority-leases/${lease.id}`, h.tenant.tokens['admin']!);
+    // Grant state describes a single-use grant's journey. A reusable lease has
+    // no such journey; its status field is the thing to read.
+    expect(read.body.authority_lease.grant_state).toBe('CREATED');
+    expect(read.body.authority_lease.status).toBe('ACTIVE');
+  });
+});
