@@ -396,6 +396,14 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           corrective_actions: result.corrective_actions,
           // Fingerprint of the conditions this decision rests on.
           context_hash: result.evaluation.context_hash,
+          // The exact operation this ALLOW authorises, bound to this ALLOW.
+          // Null for a DENY or an ESCALATE: nothing was authorised, so there
+          // is nothing to bind. The caller does not need these to execute --
+          // the enforcement boundary recomputes both from its own records --
+          // but returning them lets a caller confirm up front that the system
+          // understood the operation the same way it did.
+          exact_intent_hash: result.exact_intent_hash,
+          binding_hash: result.binding_hash,
           failover_behavior: result.evaluation.failover_behavior,
           expires_at: result.evaluation.expires_at,
           decision_timestamp: result.evaluation.decision_timestamp,

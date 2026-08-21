@@ -36,6 +36,9 @@ jobs:
         run: pnpm exec prettier --check .
       - name: Published contracts match the code
         run: pnpm exec tsx scripts/generate-specs.ts --check
+      - name: Canonicalization vectors match the implementation
+        # Drift here changes the bytes of every hash the system has issued.
+        run: pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
       - name: Unit and invariant tests
         run: pnpm exec vitest run packages
 

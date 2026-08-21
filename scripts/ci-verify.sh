@@ -26,7 +26,7 @@ export DATABASE_ADMIN_URL DATABASE_URL
 step_number=0
 step() {
   step_number=$((step_number + 1))
-  printf '\n%s\n' "${BOLD}[$step_number/8] $1${RESET}"
+  printf '\n%s\n' "${BOLD}[$step_number/9] $1${RESET}"
 }
 
 failed() {
@@ -60,6 +60,11 @@ pnpm exec prettier --check .
 
 step "published contracts match the code"
 pnpm exec tsx scripts/generate-specs.ts --check
+
+step "canonicalization vectors match the implementation"
+# A drift here changes the bytes of every hash the system has ever issued, so
+# it must never happen silently.
+pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
 step "database is reachable and migrated"
 if ! pg_isready -q 2>/dev/null; then

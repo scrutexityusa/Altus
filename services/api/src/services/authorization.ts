@@ -1,5 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
+  canonicalOperation,
+  computeBindingHash,
+  computeIntentHash,
+  type ExecutionGrantBinding,
   ScrutexityError,
   addSeconds,
   computeCorrectiveActions,
@@ -58,6 +63,13 @@ export interface AuthorizeResult {
   approval_request_id: string | null;
   /** The next legitimate step, when policy admits one. Empty for an ALLOW. */
   corrective_actions: CorrectiveAction[];
+  /**
+   * The operation this ALLOW authorises, and the authority it is bound to.
+   * Both null unless the decision was an ALLOW -- nothing else authorises an
+   * operation, so nothing else has an intent to bind. See ADR-0015.
+   */
+  exact_intent_hash: string | null;
+  binding_hash: string | null;
 }
 
 /** Context keys the control plane derives itself and will not accept from a caller. */
@@ -216,6 +228,7 @@ export async function authorize(
     startedAt: started,
     correctiveActions,
     approvalRequestId,
+    requestContext: normalizedContext,
   });
 
   await claimSingleUseGrant(client, evaluation, persisted.decision_id);
@@ -302,6 +315,11 @@ export async function reevaluateWithApprovals(
     // The re-evaluation resolves the escalation; do not open another one.
     suppressApprovalRequest: true,
     correctiveActions: reevaluationActions,
+    requestContext: request.context,
+    // The fingerprint the approvers were actually shown. Binding it means an
+    // execution presented against a different approval fails the binding check
+    // even when the operation itself is byte-identical.
+    approvedContextHash: approvalRequest.context_hash ?? null,
   });
 
   await claimSingleUseGrant(client, evaluation, persisted.decision_id);
@@ -655,16 +673,54 @@ interface PersistInput {
   suppressApprovalRequest?: boolean;
   correctiveActions: CorrectiveAction[];
   approvalRequestId?: string | null;
+  /**
+   * The context the decision was evaluated against, after server-derived facts
+   * replaced anything the caller asserted. This -- not the caller's original
+   * body -- is what the intent hash is computed from.
+   */
+  requestContext: Record<string, unknown>;
+  /**
+   * The TOCTOU fingerprint the approvers were shown, when this decision is a
+   * re-evaluation after human approval. Bound into the grant so that an
+   * execution presented against a different approval fails even though the
+   * operation itself is untouched.
+   */
+  approvedContextHash?: string | null;
 }
 
 async function persistDecision(
   client: PoolClient,
   keys: EvidenceKeys,
   input: PersistInput,
-): Promise<{ decision_id: string; receipt_id: string; approval_request_id: string | null }> {
+): Promise<{
+  decision_id: string;
+  receipt_id: string;
+  approval_request_id: string | null;
+  exact_intent_hash: string | null;
+  binding_hash: string | null;
+}> {
   const { evaluation } = input;
   const decisionId = newId('decision');
   const durationUs = Math.round((performance.now() - input.startedAt) * 1000);
+
+  // -- Exact intent binding -------------------------------------------------
+  //
+  // Only an ALLOW gets a binding, because only an ALLOW authorises an
+  // operation. Computing one for a DENY would be recording authority that was
+  // never granted.
+  //
+  // The binding is computed *here*, from the evaluated request, and never from
+  // anything a caller supplies. That is the whole point: a hash the agent
+  // provides proves only that the agent can compute a hash. See ADR-0015.
+  const binding =
+    evaluation.decision === 'ALLOW'
+      ? buildBinding(
+          decisionId,
+          evaluation,
+          input.requestContext,
+          input.approvedContextHash ?? null,
+        )
+      : null;
 
   await client.query(
     `INSERT INTO scrutexity.authorization_decisions
@@ -672,8 +728,9 @@ async function persistDecision(
         policy_version_id, policy_hash, authority_lease_id, evaluation, approval_requirement,
         failover_behavior, risk_signal_ids, approval_ids, supersedes_decision_id,
         expires_at, decided_at, evaluation_duration_us, context_hash, intent_evaluation,
-        corrective_actions)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+        corrective_actions, exact_intent_hash, binding_hash, binding_nonce, authorized_intent)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+             $23,$24,$25,$26)`,
     [
       decisionId,
       input.organizationId,
@@ -697,6 +754,10 @@ async function persistDecision(
       evaluation.context_hash,
       evaluation.intent_evaluation ? JSON.stringify(evaluation.intent_evaluation) : null,
       JSON.stringify(input.correctiveActions),
+      binding?.intent_hash ?? null,
+      binding?.binding_hash ?? null,
+      binding?.binding.nonce ?? null,
+      binding ? JSON.stringify(binding.binding.authorized_intent) : null,
     ],
   );
 
@@ -762,6 +823,12 @@ async function persistDecision(
       intent_evaluation: evaluation.intent_evaluation,
       corrective_actions: input.correctiveActions,
       explanation_text: explanation.text,
+      // The operation this decision authorised, and its two hashes. A verifier
+      // holding only the receipt can recompute both and check them, without
+      // access to the database that issued them.
+      exact_intent_hash: binding?.intent_hash ?? null,
+      binding_hash: binding?.binding_hash ?? null,
+      authorized_intent: binding?.binding.authorized_intent ?? null,
     },
   });
 
@@ -778,6 +845,53 @@ async function persistDecision(
     decision_id: decisionId,
     receipt_id: receipt.id,
     approval_request_id: approvalRequestId,
+    exact_intent_hash: binding?.intent_hash ?? null,
+    binding_hash: binding?.binding_hash ?? null,
+  };
+}
+
+/**
+ * Builds the grant binding for an ALLOW.
+ *
+ * Every input comes from the evaluated request or from the decision being
+ * written. Nothing here is caller-supplied, and nothing here reads the clock
+ * beyond the decision timestamp the evaluator already fixed, so the same
+ * evaluation always produces the same binding except for the nonce.
+ *
+ * The nonce is fresh randomness rather than a derivation of the decision id,
+ * so that two legitimately identical operations -- the same supplier, the same
+ * amount, twice in a day -- cannot produce interchangeable bindings.
+ */
+function buildBinding(
+  decisionId: string,
+  evaluation: AuthorizationEvaluation,
+  requestContext: Record<string, unknown>,
+  approvedContextHash: string | null,
+): { intent_hash: string; binding_hash: string; binding: ExecutionGrantBinding } {
+  const authorizedIntent = canonicalOperation({
+    action: evaluation.action,
+    resource: evaluation.resource,
+    context: requestContext,
+  });
+  const binding: ExecutionGrantBinding = {
+    authorized_intent: authorizedIntent,
+    authorization_context: {
+      decision_id: decisionId,
+      authority_lease_id: evaluation.authority_lease_id,
+      policy_version_id: evaluation.policy_version_id,
+      policy_hash: evaluation.policy_hash,
+      approved_context_hash: approvedContextHash,
+    },
+    grant_id: decisionId,
+    // An ALLOW always carries an expiry; the schema requires it. The fallback
+    // exists so a future decision shape cannot silently bind an eternal grant.
+    expires_at: evaluation.expires_at ?? evaluation.decision_timestamp,
+    nonce: randomUUID(),
+  };
+  return {
+    intent_hash: computeIntentHash(authorizedIntent),
+    binding_hash: computeBindingHash(binding),
+    binding,
   };
 }
 

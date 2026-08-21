@@ -15,6 +15,7 @@ export * from './money.js';
 export * from './time.js';
 export * from './errors.js';
 export * from './actions.js';
+export * from './operation.js';
 
 export * from './authority/grant.js';
 export * from './authority/lease.js';

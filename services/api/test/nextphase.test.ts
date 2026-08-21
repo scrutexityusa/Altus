@@ -963,3 +963,161 @@ describe('grant outcome is observable', () => {
     expect(read.body.authority_lease.status).toBe('ACTIVE');
   });
 });
+
+describe('exact intent binding', () => {
+  /**
+   * The binding is what turns an ALLOW from "this agent may move money" into
+   * "this agent may move *this* money to *this* counterparty". These tests
+   * check that it is recorded, that it is computed by the server rather than
+   * accepted from the caller, and that it moves when the operation does.
+   */
+  async function decisionRow(decisionId: string) {
+    let row: Record<string, unknown> = {};
+    await asOwner(async (client) => {
+      const result = await client.query(
+        `SELECT exact_intent_hash, binding_hash, binding_nonce, authorized_intent, decision
+           FROM scrutexity.authorization_decisions WHERE id = $1`,
+        [decisionId],
+      );
+      row = result.rows[0] as Record<string, unknown>;
+    });
+    return row;
+  }
+
+  it('records a complete binding on every ALLOW', async () => {
+    await issueTreasuryLease(h);
+    const allowed = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'nextphase-bind-allow' }),
+    );
+    expect(allowed.body.decision).toBe('ALLOW');
+
+    const row = await decisionRow(allowed.body.decision_id);
+    expect(row['exact_intent_hash']).toMatch(/^[0-9a-f]{64}$/);
+    expect(row['binding_hash']).toMatch(/^[0-9a-f]{64}$/);
+    expect(row['binding_nonce']).toBeTruthy();
+
+    // The recorded operation is the projection onto the action catalog, not
+    // whatever the caller happened to send.
+    const intent = row['authorized_intent'] as {
+      operation_type: string;
+      resource_id: string;
+      parameters: Record<string, unknown>;
+    };
+    expect(intent.operation_type).toBe('wire.execute');
+    expect(intent.resource_id).toBe('acct_001');
+    expect(intent.parameters['counterparty_id']).toBe('cp_100');
+  });
+
+  it('records no binding on a DENY, because nothing was authorised', async () => {
+    await issueTreasuryLease(h);
+    const denied = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({
+        nonce: 'nextphase-bind-deny',
+        resource: { type: 'bank_account', id: 'acct_999' },
+      }),
+    );
+    expect(denied.body.decision).toBe('DENY');
+
+    const row = await decisionRow(denied.body.decision_id);
+    expect(row['exact_intent_hash']).toBeNull();
+    expect(row['binding_hash']).toBeNull();
+    expect(row['authorized_intent']).toBeNull();
+  });
+
+  it('refuses a request that tries to supply its own intent hash', async () => {
+    // The server computes the binding from the request it evaluated, and a
+    // hash the agent provides proves only that the agent can compute a hash.
+    // The request schema is strict, so an attempt to smuggle one in is
+    // rejected at the boundary rather than accepted and quietly discarded --
+    // which is the better of the two failures: the caller learns immediately
+    // that the field is not an input.
+    await issueTreasuryLease(h);
+    const forged = 'f'.repeat(64);
+    const attempt = await evaluate(h.tenant.tokens['treasury_agent']!, {
+      ...wireRequest({ nonce: 'nextphase-bind-forged' }),
+      exact_intent_hash: forged,
+      binding_hash: forged,
+    });
+    expect(attempt.status).toBe(400);
+    expect(attempt.body.error.code).toBe('INVALID_REQUEST');
+  });
+
+  it('computes the intent hash from server-derived facts, not caller claims', async () => {
+    // counterparty_known is derived from the tenant's own register and
+    // overwrites whatever the caller asserted. The recorded intent therefore
+    // reflects the facts the decision was made on.
+    await issueTreasuryLease(h);
+    const honest = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'nextphase-bind-derived-1' }),
+    );
+    const lying = await evaluate(h.tenant.tokens['treasury_agent']!, {
+      ...wireRequest({ nonce: 'nextphase-bind-derived-2' }),
+      context: { ...wireRequest().context, counterparty_known: false },
+    });
+    const a = await decisionRow(honest.body.decision_id);
+    const b = await decisionRow(lying.body.decision_id);
+    expect(a['exact_intent_hash']).toBe(b['exact_intent_hash']);
+  });
+
+  it('gives two identical operations different bindings but the same intent hash', async () => {
+    await issueTreasuryLease(h);
+    const first = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'nextphase-bind-same-1' }),
+    );
+    const second = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'nextphase-bind-same-2' }),
+    );
+    const a = await decisionRow(first.body.decision_id);
+    const b = await decisionRow(second.body.decision_id);
+
+    // The operation is the same, so "did it mutate?" answers the same way.
+    expect(a['exact_intent_hash']).toBe(b['exact_intent_hash']);
+    // The authority is different, so the two are not interchangeable. This is
+    // what stops this morning's binding validating this afternoon's wire.
+    expect(a['binding_hash']).not.toBe(b['binding_hash']);
+  });
+
+  it('moves the intent hash when the operation changes', async () => {
+    await issueTreasuryLease(h);
+    const base = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: 'nextphase-bind-base' }),
+    );
+    const mutated = await evaluate(h.tenant.tokens['treasury_agent']!, {
+      ...wireRequest({ nonce: 'nextphase-bind-mutated' }),
+      context: { ...wireRequest().context, amount: '999.00' },
+    });
+    const a = await decisionRow(base.body.decision_id);
+    const b = await decisionRow(mutated.body.decision_id);
+    expect(a['exact_intent_hash']).not.toBe(b['exact_intent_hash']);
+  });
+
+  it('binds the approved context into a decision that came from an approval', async () => {
+    await issueTreasuryLease(h);
+    const escalated = await evaluate(
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({
+        nonce: 'nextphase-bind-approved',
+        context: { ...wireRequest().context, amount: '250000.00' },
+      }),
+    );
+    expect(escalated.body.decision).toBe('ESCALATE');
+
+    const approval = await h.call('POST', '/v1/approvals', h.tenant.tokens['treasurer']!, {
+      approval_request_id: escalated.body.approval_request_id,
+      vote: 'APPROVED',
+    });
+    expect(approval.body.decision.decision).toBe('ALLOW');
+
+    const row = await decisionRow(approval.body.decision.decision_id);
+    const intent = row['authorized_intent'] as { parameters: Record<string, unknown> };
+    // The operation the treasurer approved, recorded exactly.
+    expect((intent.parameters['amount'] as { amountMinor: string }).amountMinor).toBe('25000000');
+    expect(row['binding_hash']).toMatch(/^[0-9a-f]{64}$/);
+  });
+});

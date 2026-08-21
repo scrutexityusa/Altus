@@ -312,6 +312,18 @@ const DECISION_SCHEMA = {
       description:
         'Fingerprint of every input this decision rests on. Recomputed at execution; if it has moved, the action is refused rather than reconciled.',
     },
+    exact_intent_hash: {
+      type: ['string', 'null'],
+      pattern: '^[0-9a-f]{64}$',
+      description:
+        'SHA-256 of the exact operation this ALLOW authorises, projected onto the action catalog. Answers "did the operation mutate?". Null unless the decision was ALLOW. Computed by the server from the request it evaluated; it is not an input, and a request that supplies one is rejected.',
+    },
+    binding_hash: {
+      type: ['string', 'null'],
+      pattern: '^[0-9a-f]{64}$',
+      description:
+        'SHA-256 of the operation together with the decision, lease, policy version and approved context that authorised it. Answers "is this operation bound to this authority decision?". A replay of a genuine, unmutated operation under a different decision matches exact_intent_hash and fails this. Null unless the decision was ALLOW.',
+    },
     failover_behavior: { type: 'string', enum: ['FAIL_OPEN', 'FAIL_CLOSED', 'ESCALATE'] },
     expires_at: {
       type: ['string', 'null'],
