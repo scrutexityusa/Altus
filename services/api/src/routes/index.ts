@@ -27,6 +27,7 @@ import {
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
   IngestSignalSchema,
+  ExecuteSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
   RegisterSignalKeySchema,
@@ -35,12 +36,21 @@ import {
   SubmitApprovalSchema,
 } from '../schemas.js';
 import { buildDecisionTrace } from '../services/trace.js';
-import { recordSecurityEvent, type SecurityEventInput } from '../services/signals.js';
+import { recordSecurityEvent, securityEventOf } from '../services/security-events.js';
+import { enforceExecution } from '../adapter/enforce.js';
+import type { ProviderRegistry } from '../adapter/provider.js';
 import { metrics } from '../metrics.js';
 
 export interface RouteDeps {
   db: Database;
   keys: EvidenceKeys;
+  /**
+   * The execution providers this deployment is configured with. Registered at
+   * boot rather than looked up per request, so an operation with no provider
+   * is refused deterministically instead of depending on what happens to be
+   * reachable at that moment.
+   */
+  providers: ProviderRegistry;
 }
 
 declare module 'fastify' {
@@ -50,7 +60,7 @@ declare module 'fastify' {
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
-  const { db, keys } = deps;
+  const { db, keys, providers } = deps;
 
   /**
    * Runs a handler in a tenant-scoped transaction, honouring an
@@ -98,8 +108,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     try {
       return await fn();
     } catch (error) {
-      const event = (error as { internal?: { securityEvent?: SecurityEventInput } })?.internal
-        ?.securityEvent;
+      const event = securityEventOf(error);
       if (event) {
         await db
           .withTenant(request.principal.organization_id, (client) =>
@@ -535,6 +544,108 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     }),
   );
 
+  /**
+   * The enforcement boundary.
+   *
+   * Scrutexity performs the operation here. The caller presents what it
+   * believes it is executing; the boundary verifies that against the operation
+   * the grant was issued for, claims execution rights atomically, calls the
+   * provider under a key derived from the grant, and writes evidence naming
+   * both hashes.
+   *
+   * Wrapped in `recordingRejections` because every refusal on this path is a
+   * security event, and the transaction that produced it is about to roll back
+   * -- see services/security-events.ts.
+   */
+  app.post('/v1/execute', async (request, reply) => {
+    requireScope(request.principal, SCOPES.authorize);
+    const body = ExecuteSchema.parse(request.body);
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/execute', async (client) => {
+        const agentId =
+          request.principal.type === 'agent'
+            ? request.principal.id
+            : await decisionAgentId(client, body.decision_id);
+        const result = await enforceExecution(client, keys, providers, {
+          organizationId: request.principal.organization_id,
+          decisionId: body.decision_id,
+          agentId,
+          presentedOperation: body.operation,
+        });
+        return { status: 201, body: result };
+      }),
+    );
+    reply.code(status).send(payload);
+  });
+
+  /**
+   * Everything the boundary started and could not finish.
+   *
+   * A claim is EXECUTING while the provider call is in flight, and UNKNOWN
+   * when the provider did not answer. Either state, once it has been sitting
+   * for a while, means authority was spent and nobody in this system knows
+   * what happened at the other end. Only the external system can settle that,
+   * so this endpoint exists to hand an operator or a reconciliation job the
+   * list rather than have it construct one.
+   *
+   * Deliberately not a background worker inside the API process: with more
+   * than one replica that needs leader election, and a reconciliation loop
+   * that runs twice is exactly the thing that turns an UNKNOWN into a double
+   * payment.
+   */
+  app.get<{ Querystring: { older_than_seconds?: string } }>(
+    '/v1/executions/unresolved',
+    async (request) => {
+      requireScope(request.principal, SCOPES.authorize);
+      const olderThan = Math.min(
+        86_400,
+        Math.max(0, Number(request.query.older_than_seconds ?? 0) || 0),
+      );
+      return db.withTenant(request.principal.organization_id, async (client) => {
+        const result = await client.query(
+          `SELECT c.id, c.decision_id, c.agent_id, c.state, c.provider,
+                  c.idempotency_key, c.external_reference, c.last_error,
+                  c.claimed_at, c.resolved_at
+             FROM scrutexity.execution_claims c
+            WHERE c.state IN ('EXECUTING', 'UNKNOWN')
+              AND c.claimed_at < now() - make_interval(secs => $1)
+            ORDER BY c.claimed_at ASC
+            LIMIT 200`,
+          [olderThan],
+        );
+        return {
+          unresolved: result.rows.map((row) => ({
+            claim_id: row.id,
+            decision_id: row.decision_id,
+            agent_id: row.agent_id,
+            state: row.state,
+            provider: row.provider,
+            // The key the provider was called under. A reconciliation job asks
+            // the provider about *this* key; asking about anything else would
+            // be asking about a different request.
+            idempotency_key: row.idempotency_key,
+            external_reference: row.external_reference,
+            last_error: row.last_error,
+            claimed_at: (row.claimed_at as Date).toISOString(),
+            resolved_at: row.resolved_at ? (row.resolved_at as Date).toISOString() : null,
+          })),
+        };
+      });
+    },
+  );
+
+  /**
+   * The self-report path.
+   *
+   * The caller performed the operation itself and is telling Scrutexity what
+   * happened. Scrutexity records it, spends the grant and writes a receipt --
+   * but it verified nothing about the operation, because it never saw one.
+   *
+   * This is not enforcement and evidence written here says so: the attempt
+   * carries `enforced = false`. Kept because an integration that cannot route
+   * its side effects through a provider is better off recording them than
+   * recording nothing, and removed the moment it stops being true.
+   */
   app.post('/v1/executions', async (request, reply) => {
     requireScope(request.principal, SCOPES.authorize);
     const body = RecordExecutionSchema.parse(request.body);

@@ -143,6 +143,33 @@ export const RecordExecutionSchema = z
   })
   .strict();
 
+/**
+ * The enforced execution path.
+ *
+ * The caller presents the operation it believes it is about to perform. That
+ * is a claim, not an input: the boundary canonicalises it, hashes it, and
+ * compares it against the hash recorded when the grant was issued. A caller
+ * that changes anything -- an amount, a recipient, an account -- produces a
+ * mismatch and a security event rather than a wire.
+ *
+ * There is deliberately no status field. The caller does not report an
+ * outcome here; Scrutexity performs the operation and determines the outcome
+ * itself. A caller-reported outcome is what the legacy /v1/executions path
+ * accepts, and it is not enforcement.
+ */
+export const ExecuteSchema = z
+  .object({
+    decision_id: z.string().min(1),
+    operation: z
+      .object({
+        action: z.string().min(1).max(128),
+        resource: ResourceRefSchema,
+        context: z.record(z.string(), z.unknown()).default({}),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const CreatePolicyVersionSchema = z
   .object({
     /** The policy document, as YAML text or an already-parsed object. */

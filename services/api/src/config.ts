@@ -17,6 +17,14 @@ const ConfigSchema = z.object({
   RECEIPT_SIGNING_KEY_B64: z.string().default(''),
   EXECUTION_GRANT_TTL_SECONDS: z.coerce.number().int().min(5).max(86_400).default(300),
   APPROVAL_TTL_SECONDS: z.coerce.number().int().min(30).max(86_400).default(3600),
+  /**
+   * Comma-separated execution providers, or "none".
+   *
+   * The default is the simulated provider, which is right for development and
+   * refused outright in production -- a simulated provider there would emit
+   * receipts indistinguishable from real ones for money that never moved.
+   */
+  EXECUTION_PROVIDERS: z.string().default('simulated-treasury'),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & { isProduction: boolean };

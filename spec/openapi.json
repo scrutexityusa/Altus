@@ -1751,6 +1751,65 @@
           }
         }
       },
+      "ExecuteRequest": {
+        "$ref": "#/definitions/ExecuteRequest",
+        "definitions": {
+          "ExecuteRequest": {
+            "type": "object",
+            "properties": {
+              "decision_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "operation": {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "resource": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "context": {
+                    "type": "object",
+                    "additionalProperties": {},
+                    "default": {}
+                  }
+                },
+                "required": [
+                  "action",
+                  "resource"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "decision_id",
+              "operation"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
       "CreatePolicyVersionRequest": {
         "$ref": "#/definitions/CreatePolicyVersionRequest",
         "definitions": {
@@ -2882,6 +2941,195 @@
                       "$ref": "#/components/schemas/Explanation"
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/execute": {
+      "post": {
+        "tags": [
+          "Execution"
+        ],
+        "summary": "Execute the exact operation an ALLOW authorised",
+        "description": "The enforcement boundary. The caller presents the operation it believes it is about to perform; Scrutexity canonicalises it, recomputes both the intent hash and the binding hash, checks the authority is still live, claims execution rights atomically, and only then calls the provider under a key derived from the grant. A mutated operation is refused before the external system is contacted, and the refusal is recorded as a security event that survives the rolled-back transaction. This is the only path on which Scrutexity performs the operation itself.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The operation was executed, or the provider reported a definite failure, or the provider did not answer. Read `status`: EXECUTED, FAILED or UNKNOWN. UNKNOWN is never reported as FAILED -- \"the wire did not go\" and \"I do not know whether the wire went\" call for opposite responses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The operation does not match the one that was authorised (INTENT_MISMATCH, with the diverging field names in `details.mutated_fields`), the authority behind it is revoked or expired, or the decision belongs to another agent. The external system was not contacted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This grant has already been executed against (REPLAY_DETECTED). Exactly one of any number of concurrent attempts wins.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/executions/unresolved": {
+      "get": {
+        "tags": [
+          "Execution"
+        ],
+        "summary": "Execution claims that were started and never settled",
+        "description": "A claim is EXECUTING while a provider call is in flight and UNKNOWN when the provider did not answer. Either state means authority was spent and this system does not know what happened at the other end; only the external system can settle it. Each row carries the idempotency key the provider was called under, which is what a reconciliation job must ask the provider about. Pass `older_than_seconds` to exclude claims that are simply still in progress.",
+        "parameters": [
+          {
+            "name": "older_than_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 86400
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unresolved claims, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
                 }
               }
             }

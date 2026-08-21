@@ -186,6 +186,23 @@ export const metrics = {
     'scrutexity_signal_invalid_signature_total',
     'Signals rejected for a bad or unknown signature, by reason',
   ),
+  // -- The execution enforcement boundary -----------------------------------
+  executionsClaimed: counter(
+    'scrutexity_executions_claimed_total',
+    'Execution rights atomically claimed against a grant, by provider',
+  ),
+  executionsSettled: counter(
+    'scrutexity_executions_settled_total',
+    'Enforced executions settled, by provider and provider-reported status',
+  ),
+  intentBindingMismatches: counter(
+    'scrutexity_intent_binding_mismatch_total',
+    'Executions refused because the operation did not match its grant, by kind',
+  ),
+  executionsUnresolved: counter(
+    'scrutexity_executions_unresolved_total',
+    'Enforced executions that ended without an answer from the provider, by provider',
+  ),
   securityEvents: counter('scrutexity_security_events_total', 'Security events recorded, by kind'),
   policyEvaluationFailures: counter(
     'scrutexity_policy_evaluation_failures_total',

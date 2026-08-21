@@ -24,6 +24,7 @@ export const ID_PREFIXES = {
   approvalRequest: 'apr',
   approval: 'apv',
   execution: 'exec',
+  executionClaim: 'xclaim',
   receipt: 'rcpt',
   securityEvent: 'sec',
   signalKey: 'sigkey',

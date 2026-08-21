@@ -28,6 +28,7 @@ import type { PoolClient } from '../db/pool.js';
 import { toLease, type AgentRow, type LeaseRow, type SignalRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
+import { normalizeContext } from './request-context.js';
 
 /**
  * ============================================================================
@@ -423,33 +424,6 @@ async function buildSnapshot(
  * influence anything. A caller that sends `"amount": 0.1` gets an
  * INVALID_REQUEST, not a threshold comparison against a float.
  */
-function normalizeContext(context: Record<string, unknown>): Record<string, unknown> {
-  const normalized: Record<string, unknown> = { ...context };
-  const amount = normalized['amount'];
-  const currency = normalized['currency'];
-  if (amount !== undefined && amount !== null) {
-    if (typeof currency !== 'string') {
-      throw new ScrutexityError('INVALID_REQUEST', 'context.amount requires context.currency');
-    }
-    if (typeof amount !== 'string' && typeof amount !== 'number') {
-      throw new ScrutexityError(
-        'INVALID_REQUEST',
-        'context.amount must be a decimal string or an integer',
-      );
-    }
-    try {
-      normalized['amount'] = parseMoney(amount, currency);
-    } catch (error) {
-      throw new ScrutexityError(
-        'INVALID_REQUEST',
-        error instanceof Error ? error.message : 'invalid amount',
-      );
-    }
-    normalized['currency'] = currency.toUpperCase();
-  }
-  return normalized;
-}
-
 /** Facts the control plane establishes itself from the tenant's own records. */
 async function deriveContext(
   client: PoolClient,

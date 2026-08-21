@@ -22,6 +22,7 @@ import {
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
   IngestSignalSchema,
+  ExecuteSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
   RegisterSignalKeySchema,
@@ -477,6 +478,7 @@ function buildOpenApi(): unknown {
         IngestSignalRequest: jsonSchema(IngestSignalSchema, 'IngestSignalRequest'),
         SubmitApprovalRequest: jsonSchema(SubmitApprovalSchema, 'SubmitApprovalRequest'),
         RecordExecutionRequest: jsonSchema(RecordExecutionSchema, 'RecordExecutionRequest'),
+        ExecuteRequest: jsonSchema(ExecuteSchema, 'ExecuteRequest'),
         CreatePolicyVersionRequest: jsonSchema(
           CreatePolicyVersionSchema,
           'CreatePolicyVersionRequest',
@@ -718,6 +720,53 @@ function buildOpenApi(): unknown {
                 explanation: { $ref: '#/components/schemas/Explanation' },
               },
             }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/execute': {
+        post: {
+          tags: ['Execution'],
+          summary: 'Execute the exact operation an ALLOW authorised',
+          description:
+            'The enforcement boundary. The caller presents the operation it believes it is about to perform; Scrutexity canonicalises it, recomputes both the intent hash and the binding hash, checks the authority is still live, claims execution rights atomically, and only then calls the provider under a key derived from the grant. A mutated operation is refused before the external system is contacted, and the refusal is recorded as a security event that survives the rolled-back transaction. This is the only path on which Scrutexity performs the operation itself.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/ExecuteRequest' }),
+          responses: {
+            '201': jsonResponse(
+              'The operation was executed, or the provider reported a definite failure, or the provider did not answer. Read `status`: EXECUTED, FAILED or UNKNOWN. UNKNOWN is never reported as FAILED -- "the wire did not go" and "I do not know whether the wire went" call for opposite responses.',
+              { type: 'object' },
+            ),
+            // Spread first, so the descriptions below replace the generic ones
+            // rather than being silently overwritten by them.
+            ...ERROR_RESPONSES,
+            '403': jsonResponse(
+              'The operation does not match the one that was authorised (INTENT_MISMATCH, with the diverging field names in `details.mutated_fields`), the authority behind it is revoked or expired, or the decision belongs to another agent. The external system was not contacted.',
+              { $ref: '#/components/schemas/Error' },
+            ),
+            '409': jsonResponse(
+              'This grant has already been executed against (REPLAY_DETECTED). Exactly one of any number of concurrent attempts wins.',
+              { $ref: '#/components/schemas/Error' },
+            ),
+          },
+        },
+      },
+      '/v1/executions/unresolved': {
+        get: {
+          tags: ['Execution'],
+          summary: 'Execution claims that were started and never settled',
+          description:
+            'A claim is EXECUTING while a provider call is in flight and UNKNOWN when the provider did not answer. Either state means authority was spent and this system does not know what happened at the other end; only the external system can settle it. Each row carries the idempotency key the provider was called under, which is what a reconciliation job must ask the provider about. Pass `older_than_seconds` to exclude claims that are simply still in progress.',
+          parameters: [
+            {
+              name: 'older_than_seconds',
+              in: 'query',
+              required: false,
+              schema: { type: 'integer', minimum: 0, maximum: 86400 },
+            },
+          ],
+          responses: {
+            '200': jsonResponse('Unresolved claims, oldest first.', { type: 'object' }),
             ...ERROR_RESPONSES,
           },
         },

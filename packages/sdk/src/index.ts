@@ -109,6 +109,25 @@ export interface AuthorizationDecision {
   correctiveAction(type: CorrectiveActionType): CorrectiveAction | undefined;
 }
 
+export interface ExecutionResult {
+  execution_id: string;
+  claim_id: string;
+  receipt_id: string;
+  /**
+   * EXECUTED, FAILED, or UNKNOWN. UNKNOWN is never reported as FAILED: "the
+   * operation did not happen" and "I do not know whether it happened" call for
+   * opposite responses, and conflating them is how a system causes a double
+   * payment.
+   */
+  status: 'EXECUTED' | 'FAILED' | 'UNKNOWN';
+  external_reference: string | null;
+  provider: string;
+  /** Both sides of the comparison, so a caller can check rather than trust. */
+  authorized_intent_hash: string;
+  executed_intent_hash: string;
+  intent_verified: true;
+}
+
 export interface DelegateRequest {
   issuerAgentId: string;
   delegateAgentId: string;
@@ -252,6 +271,43 @@ export class ScrutexityClient {
     }
   }
 
+  /**
+   * Executes the operation an ALLOW authorised, through the enforcement
+   * boundary.
+   *
+   * Scrutexity performs the operation; this does not report one. The operation
+   * passed here is a claim that gets checked against the one the grant was
+   * issued for, so it must be the same operation that was authorised --
+   * changing an amount or a recipient produces INTENT_MISMATCH naming the
+   * fields that diverged, and the external system is never contacted.
+   *
+   * Read `status` rather than assuming success. UNKNOWN means the provider did
+   * not answer: the grant is spent and whether the operation happened is not
+   * something this system can tell you. Retrying is not safe without
+   * reconciling first.
+   */
+  async execute(
+    decisionId: string,
+    operation: {
+      action: string;
+      resource: { type: string; id: string };
+      context?: Record<string, unknown>;
+    },
+  ): Promise<ExecutionResult> {
+    return this.#request('POST', '/v1/execute', {
+      decision_id: decisionId,
+      operation: { ...operation, context: operation.context ?? {} },
+    });
+  }
+
+  /**
+   * Records an execution the caller performed itself.
+   *
+   * Scrutexity verified nothing about the operation here, because it never saw
+   * one -- evidence written on this path carries `enforced: false`. Prefer
+   * `execute()`, which is the enforced path, wherever the side effect can be
+   * routed through a provider.
+   */
   async recordExecution(
     decisionId: string,
     status: 'SUCCEEDED' | 'FAILED',

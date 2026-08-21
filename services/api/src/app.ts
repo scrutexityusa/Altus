@@ -8,6 +8,7 @@ import { authenticate } from './auth.js';
 import { toErrorResponse } from './errors.js';
 import { metrics, renderMetrics } from './metrics.js';
 import { loadEvidenceKeys, type EvidenceKeys } from './services/evidence.js';
+import { loadProviders } from './adapter/registry.js';
 import { registerRoutes } from './routes/index.js';
 
 export interface App {
@@ -46,6 +47,7 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
   const logger = createLogger(config);
   const db = createDatabase(config);
   const keys = loadEvidenceKeys(config);
+  const providers = loadProviders(config);
 
   const server = Fastify({
     loggerInstance: logger,
@@ -151,7 +153,7 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     instance.addHook('onResponse', async (request) => {
       (request as unknown as { span?: Span }).span?.end();
     });
-    await registerRoutes(instance, { db, keys });
+    await registerRoutes(instance, { db, keys, providers });
   });
 
   return {

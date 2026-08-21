@@ -9,6 +9,7 @@ import {
 import type { PoolClient } from '../db/pool.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
+import { recordSecurityEvent, type SecurityEventInput } from './security-events.js';
 
 /**
  * The signal plane (Section 12).
@@ -308,35 +309,13 @@ async function loadSigningKeys(
   }));
 }
 
-export interface SecurityEventInput {
-  organizationId: string;
-  kind: string;
-  source?: string | null;
-  subjectId?: string | null;
-  detail?: Record<string, unknown>;
-}
-
 /**
- * Records a security event. Append-only, tenant-scoped, and queryable without
- * reading application logs -- an operator investigating a rejected signal
- * should not need access to stdout on a production node.
+ * Security events live in ./security-events.js, which documents why they are
+ * written outside the transaction that produced them. Re-exported here so the
+ * signal paths that raise them keep reading naturally.
  */
-export async function recordSecurityEvent(
-  client: PoolClient,
-  input: SecurityEventInput,
-): Promise<void> {
-  await client.query(
-    `INSERT INTO scrutexity.security_events
-       (id, organization_id, kind, source, subject_id, detail)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
-    [
-      newId('securityEvent'),
-      input.organizationId,
-      input.kind,
-      input.source ?? null,
-      input.subjectId ?? null,
-      JSON.stringify(input.detail ?? {}),
-    ],
-  );
-  metrics.securityEvents.inc({ kind: input.kind });
-}
+export {
+  recordSecurityEvent,
+  securityEventOf,
+  type SecurityEventInput,
+} from './security-events.js';
