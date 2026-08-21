@@ -126,6 +126,53 @@ pins a pooled connection or the row locks it held, and the call is now bounded
 at 30 seconds — resolving to `UNKNOWN`, never `FAILED`, because a deadline
 passing says nothing about whether the money moved.
 
+### The retry path is claim-aware
+
+Committing the claim before acting is only half the property. The other half
+is what a _retry_ does when it finds one, and answering "a claim exists,
+refuse" to all three cases was too coarse:
+
+| Claim found                          | Meaning                                  | Response                                        |
+| ------------------------------------ | ---------------------------------------- | ----------------------------------------------- |
+| none                                 | nothing has been attempted               | proceed                                         |
+| `EXECUTING`                          | reached the provider, outcome unrecorded | **409 `EXECUTION_UNRESOLVED`**                  |
+| `UNKNOWN`                            | provider did not answer                  | **409 `EXECUTION_UNRESOLVED`**                  |
+| `EXECUTED` / `FAILED` / `RECONCILED` | outcome is known                         | **200, the recorded outcome, `replayed: true`** |
+
+The middle two are not replays. A replay means "this was already done"; these
+mean "this may or may not have been done". Reporting `REPLAY_DETECTED` for
+them tells a caller the work is finished when what is actually true is that
+somebody has to go and ask the bank — and a caller that believes the work is
+finished is one step from authorising a fresh one.
+
+The last row is idempotent replay: 200 rather than 201, because nothing was
+created and the provider was not called. A client retrying after a network
+blip gets its answer, not an error.
+
+### The idempotency key outlives the request
+
+`UNIQUE (decision_id)` stops **Scrutexity** issuing a second claim. It does
+nothing to stop the **bank** executing twice in this sequence:
+
+```
+claim committed
+provider accepted the request
+settlement failed (process died)
+an operator reconciles and resubmits
+```
+
+That resubmission is a different request, possibly days later, possibly from a
+different machine. It must carry the same key or the provider sees a new
+payment. So `scrutexity:{decision_id}` is derived from the grant and never
+regenerated — not on retry, not on reconciliation, not on manual replay — and
+that is now stated as part of the provider contract rather than left implicit.
+
+`ExecutionProvider` also gained an optional `verifyExecution`, the one call
+that is safe to make against an operation whose status is unknown. A provider
+that cannot answer it leaves its unresolved executions `UNKNOWN` until a human
+settles them, which is the honest outcome and better than a confident wrong
+one.
+
 `/v1/execute` is consequently not wrapped in the idempotency-key helper: the
 boundary owns its transactions, and an outer transaction would put the external
 call back inside one it does not control. Nothing is lost, because the grant

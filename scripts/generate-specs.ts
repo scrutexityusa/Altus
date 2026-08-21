@@ -778,6 +778,10 @@ function buildOpenApi(): unknown {
           parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
           requestBody: jsonBody({ $ref: '#/components/schemas/ExecuteRequest' }),
           responses: {
+            '200': jsonResponse(
+              'The recorded outcome of an earlier execution against this authorization. `replayed` is true, nothing was created, and the provider was not called again. A client retrying after a network failure gets its answer here rather than a second payment.',
+              { type: 'object' },
+            ),
             '201': jsonResponse(
               'The operation was executed, or the provider reported a definite failure, or the provider did not answer. Read `status`: EXECUTED, FAILED or UNKNOWN. UNKNOWN is never reported as FAILED -- "the wire did not go" and "I do not know whether the wire went" call for opposite responses.',
               { type: 'object' },
@@ -790,7 +794,7 @@ function buildOpenApi(): unknown {
               { $ref: '#/components/schemas/Error' },
             ),
             '409': jsonResponse(
-              'This grant has already been executed against (REPLAY_DETECTED). Exactly one of any number of concurrent attempts wins.',
+              'EXECUTION_UNRESOLVED: an execution against this authorization is in flight, or reached the provider and was interrupted before its outcome was recorded. It must be reconciled -- see GET /v1/executions/unresolved -- and resubmitted under the same idempotency key. This is deliberately not REPLAY_DETECTED: a replay means "already done", this means "may or may not have been done".',
               { $ref: '#/components/schemas/Error' },
             ),
           },

@@ -666,7 +666,11 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         presentedOperation: body.operation,
       });
     });
-    reply.code(201).send(payload);
+    // 200, not 201, when this is the recorded outcome of an earlier execution.
+    // Nothing was created and the provider was not called; a client retrying
+    // after a network blip gets its answer, and the status says plainly that
+    // it is looking at the same event again rather than a new one.
+    reply.code(payload.replayed === true ? 200 : 201).send(payload);
   });
 
   /**

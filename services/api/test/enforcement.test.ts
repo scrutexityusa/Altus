@@ -222,20 +222,26 @@ describe('mutation between authorization and execution', () => {
 });
 
 describe('replay and concurrency', () => {
-  it('refuses a second execution against the same grant', async () => {
+  it('returns the recorded outcome for a second execution, and does not repeat it', async () => {
+    // Idempotent replay, not refusal. A client that retries after a network
+    // blip needs its answer; what it must never get is a second payment.
     const { decision, operation } = await authorisedWire('enforce-replay');
     const first = await execute(h.tenant.tokens['treasury_agent']!, {
       decision_id: decision.decision_id,
       operation,
     });
     expect(first.status).toBe(201);
+    expect(first.body.replayed).toBeUndefined();
 
     const second = await execute(h.tenant.tokens['treasury_agent']!, {
       decision_id: decision.decision_id,
       operation,
     });
-    expect(second.status).toBe(409);
-    expect(second.body.error.code).toBe('REPLAY_DETECTED');
+    // 200: nothing was created this time and the provider was not called.
+    expect(second.status).toBe(200);
+    expect(second.body.replayed).toBe(true);
+    expect(second.body.status).toBe(first.body.status);
+    expect(second.body.external_reference).toBe(first.body.external_reference);
   });
 
   it('admits exactly one of ten simultaneous executions', async () => {
@@ -252,13 +258,29 @@ describe('replay and concurrency', () => {
       ),
     );
 
+    // The invariant is "exactly one execution", not "nine of a particular
+    // error". A loser sees EXECUTION_UNRESOLVED if the winner is still in the
+    // provider call, or the recorded outcome if it already settled -- which of
+    // those it gets is a genuine race and asserting on it would make this test
+    // flaky about something that does not matter.
     const executed = attempts.filter((a) => a.status === 201);
-    const refused = attempts.filter((a) => a.status === 409);
     expect(executed).toHaveLength(1);
-    expect(refused).toHaveLength(9);
-    for (const attempt of refused) {
-      expect(attempt.body.error.code).toBe('REPLAY_DETECTED');
+    for (const attempt of attempts.filter((a) => a.status !== 201)) {
+      expect([200, 409]).toContain(attempt.status);
+      if (attempt.status === 200) expect(attempt.body.replayed).toBe(true);
+      else expect(attempt.body.error.code).toBe('EXECUTION_UNRESOLVED');
     }
+
+    // What actually matters: the provider ran once.
+    let attemptRows = 0;
+    await asOwner(async (client) => {
+      const row = await client.query(
+        'SELECT count(*)::int AS n FROM scrutexity.execution_attempts WHERE decision_id = $1',
+        [decision.decision_id],
+      );
+      attemptRows = row.rows[0].n as number;
+    });
+    expect(attemptRows).toBe(1);
   });
 });
 
@@ -583,18 +605,20 @@ describe('the claim is committed before the provider is called', () => {
 
     await asOwner(async (client) => {
       const row = await client.query(
-        `SELECT c.state, c.claimed_at, c.resolved_at, e.created_at AS attempt_at
+        `SELECT c.state,
+                -- Both timestamps come from the database, so this compares one
+                -- clock against itself. Asserted in SQL rather than by
+                -- subtracting two JavaScript Dates, which would reintroduce a
+                -- second clock into a test about not having one.
+                (c.claimed_at <= c.resolved_at) AS ordered,
+                (c.claimed_at IS NOT NULL AND c.resolved_at IS NOT NULL) AS both_set
            FROM scrutexity.execution_claims c
-           LEFT JOIN scrutexity.execution_attempts e ON e.claim_id = c.id
           WHERE c.decision_id = $1`,
         [decision.decision_id],
       );
       seenDuringCall = row.rows[0] as { state: string };
-      // The claim was written first and settled afterwards: two separate
-      // commits, in order.
-      expect((row.rows[0].claimed_at as Date).getTime()).toBeLessThanOrEqual(
-        (row.rows[0].resolved_at as Date).getTime(),
-      );
+      expect(row.rows[0].both_set).toBe(true);
+      expect(row.rows[0].ordered, 'the claim settled before it was made').toBe(true);
     });
     expect(seenDuringCall?.state).toBe('EXECUTED');
   });
@@ -631,9 +655,8 @@ describe('the claim is committed before the provider is called', () => {
     ).toBe(true);
   });
 
-  it('still refuses a replay after the split', async () => {
-    // The split must not have weakened the exactly-once guarantee it exists to
-    // strengthen.
+  it('still executes exactly once after the split', async () => {
+    // The split must not have weakened the guarantee it exists to strengthen.
     const { decision, operation } = await authorisedWire('enforce-commit-replay');
     const first = await execute(h.tenant.tokens['treasury_agent']!, {
       decision_id: decision.decision_id,
@@ -644,8 +667,8 @@ describe('the claim is committed before the provider is called', () => {
       decision_id: decision.decision_id,
       operation,
     });
-    expect(second.status).toBe(409);
-    expect(second.body.error.code).toBe('REPLAY_DETECTED');
+    expect(second.status).toBe(200);
+    expect(second.body.replayed).toBe(true);
   });
 
   it('holds no transaction open across the provider call', async () => {
@@ -668,5 +691,160 @@ describe('the claim is committed before the provider is called', () => {
     for (const result of results) {
       expect(result.status, JSON.stringify(result.body)).toBe(201);
     }
+  });
+});
+
+describe('the provider succeeded and settlement never happened', () => {
+  /**
+   * The nastiest surviving state, and the one the two-transaction split exists
+   * to make survivable:
+   *
+   *     T1 COMMIT
+   *     provider moves the money
+   *     process dies
+   *     T2 never runs
+   *
+   * Scrutexity now holds a committed EXECUTING claim while the outside world
+   * says the payment happened. The only correct behaviour is to refuse to act
+   * further and route it to reconciliation. Retrying would pay twice; calling
+   * it FAILED would assert something nobody knows.
+   *
+   * The crash is simulated by leaving the claim in exactly the state a crash
+   * leaves it in -- which is the point of committing it before the call.
+   */
+  async function crashedMidExecution(nonce: string) {
+    const { decision, operation } = await authorisedWire(nonce);
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.status).toBe(201);
+
+    // Rewind the claim to the state T2 would have found it in. The execution
+    // attempt is removed too: on a real crash it was never written.
+    await asOwner(async (client) => {
+      await client.query(
+        'ALTER TABLE scrutexity.execution_attempts DISABLE TRIGGER execution_attempts_append_only',
+      );
+      await client.query(
+        `DELETE FROM scrutexity.execution_attempts
+          WHERE claim_id = (SELECT id FROM scrutexity.execution_claims WHERE decision_id = $1)`,
+        [decision.decision_id],
+      );
+      await client.query(
+        'ALTER TABLE scrutexity.execution_attempts ENABLE TRIGGER execution_attempts_append_only',
+      );
+      await client.query(
+        `UPDATE scrutexity.execution_claims
+            SET state = 'EXECUTING', resolved_at = NULL, external_reference = NULL
+          WHERE decision_id = $1`,
+        [decision.decision_id],
+      );
+    });
+    return { decision, operation };
+  }
+
+  it('refuses a retry rather than paying again', async () => {
+    const { decision, operation } = await crashedMidExecution('enforce-t2-crash');
+
+    const retry = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(retry.status).toBe(409);
+    // Not REPLAY_DETECTED. A replay means "this was already done"; this means
+    // "this may or may not have been done", and telling a caller the first
+    // when the second is true is how a second payment gets authorised.
+    expect(retry.body.error.code).toBe('EXECUTION_UNRESOLVED');
+    expect(retry.body.error.details.state).toBe('EXECUTING');
+  });
+
+  it('never reaches the provider on that retry', async () => {
+    const { decision, operation } = await crashedMidExecution('enforce-t2-nocontact');
+
+    let before = 0;
+    await asOwner(async (client) => {
+      const row = await client.query(
+        'SELECT count(*)::int AS n FROM scrutexity.execution_attempts WHERE decision_id = $1',
+        [decision.decision_id],
+      );
+      before = row.rows[0].n as number;
+    });
+
+    await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+
+    let after = 0;
+    await asOwner(async (client) => {
+      const row = await client.query(
+        'SELECT count(*)::int AS n FROM scrutexity.execution_attempts WHERE decision_id = $1',
+        [decision.decision_id],
+      );
+      after = row.rows[0].n as number;
+    });
+    expect(after).toBe(before);
+  });
+
+  it('surfaces it for reconciliation under the original idempotency key', async () => {
+    // The key an operator must resubmit under. A reconciliation that invented
+    // a new one would look to the bank like a second payment.
+    const { decision } = await crashedMidExecution('enforce-t2-reconcile');
+
+    const unresolved = await h.call('GET', '/v1/executions/unresolved', h.tenant.tokens['admin']!);
+    const row = unresolved.body.unresolved.find(
+      (u: { decision_id: string }) => u.decision_id === decision.decision_id,
+    );
+    expect(row, 'a crashed execution must be findable').toBeTruthy();
+    expect(row.state).toBe('EXECUTING');
+    expect(row.idempotency_key).toBe(`scrutexity:${decision.decision_id}`);
+  });
+
+  it('keeps the grant spent, because authority was used', async () => {
+    const lease = await issueTreasuryLease(h, h.tenant, { grant_type: 'SINGLE_USE' });
+    const request = wireRequest({
+      nonce: 'enforce-t2-grant-spent',
+      authority_lease_id: lease.id,
+    });
+    const decision = await evaluate(h.tenant.tokens['treasury_agent']!, request);
+    expect(decision.body.decision).toBe('ALLOW');
+    await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.body.decision_id,
+      operation: operationOf(request),
+    });
+
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.execution_claims
+            SET state = 'EXECUTING', resolved_at = NULL WHERE decision_id = $1`,
+        [decision.body.decision_id],
+      );
+    });
+
+    // The grant was spent in T1, alongside the claim, and both committed
+    // together. A crash after that cannot give the authority back.
+    const read = await h.call('GET', `/v1/authority-leases/${lease.id}`, h.tenant.tokens['admin']!);
+    expect(read.body.authority_lease.consumed).toBe(true);
+  });
+
+  it('returns the recorded outcome when the claim did settle', async () => {
+    // The other side of the three-state retry: a finished execution replays
+    // its answer instead of refusing, and the provider is not called again.
+    const { decision, operation } = await authorisedWire('enforce-t2-settled');
+    const first = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(first.status).toBe(201);
+    expect(first.body.status).toBe('EXECUTED');
+
+    const again = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(again.status).toBe(200);
+    expect(again.body.replayed).toBe(true);
+    expect(again.body.external_reference).toBe(first.body.external_reference);
   });
 });

@@ -128,6 +128,13 @@ export interface EnforceExecutionResult {
   executed_intent_hash: string;
   /** Always true here: a mismatch throws rather than returning. */
   intent_verified: true;
+  /**
+   * True when this is the recorded outcome of an earlier execution rather than
+   * a fresh one. The provider was not called. A caller that retries has to be
+   * able to tell "it worked" from "it worked, earlier, and I am seeing it
+   * again" -- they are the same outcome but not the same event.
+   */
+  replayed?: boolean;
 }
 
 interface DecisionRow {
@@ -171,6 +178,11 @@ export async function enforceExecution(
     prepare(client, providers, input),
   );
 
+  // A prior execution already reached a definite outcome. Return it rather
+  // than calling the provider again: the caller asking twice must get the
+  // same answer, not a second payment.
+  if (prepared.kind === 'settled') return prepared.result;
+
   // -- Phase 2: the external call, holding no transaction -------------------
   const outcome = await callProvider(prepared.provider, {
     operation: prepared.operation,
@@ -194,13 +206,23 @@ export async function enforceExecution(
   );
 }
 
-interface PreparedExecution {
-  claimId: string;
-  decision: DecisionRow;
-  provider: ExecutionProvider;
-  operation: CanonicalOperation;
-  executedIntentHash: string;
-}
+/**
+ * What phase 1 concluded.
+ *
+ * `settled` is the idempotent-replay case: a prior execution against this
+ * grant already reached a definite outcome, so the recorded one is returned
+ * and the provider is not called again.
+ */
+type PreparedExecution =
+  | {
+      kind: 'proceed';
+      claimId: string;
+      decision: DecisionRow;
+      provider: ExecutionProvider;
+      operation: CanonicalOperation;
+      executedIntentHash: string;
+    }
+  | { kind: 'settled'; result: EnforceExecutionResult };
 
 /**
  * Every check, the atomic claim, and the grant spend -- in one transaction
@@ -423,7 +445,7 @@ async function prepare(
   // it is a single INSERT guarded by UNIQUE (decision_id): whoever the
   // database lets in has the right to execute, and there is no interval in
   // which two contenders both believe they do.
-  const claimId = await claimExecution(client, {
+  const claim = await claimExecution(client, {
     organizationId: input.organizationId,
     decisionId: decision.id,
     agentId: input.agentId,
@@ -432,6 +454,10 @@ async function prepare(
     exactIntentHash: decision.exact_intent_hash,
     bindingHash: decision.binding_hash,
   });
+  // Somebody else got here first and already finished. Hand back what they
+  // got; the grant is spent and the money has moved exactly once.
+  if (claim.kind === 'settled') return { kind: 'settled', result: claim.result };
+  const claimId = claim.claimId;
 
   // -- 10. Spend the grant --------------------------------------------------
   //
@@ -456,7 +482,14 @@ async function prepare(
     if ((consumed.rowCount ?? 0) > 0) metrics.singleUseGrantsConsumed.inc({});
   }
 
-  return { claimId, decision, provider, operation: presented, executedIntentHash };
+  return {
+    kind: 'proceed',
+    claimId,
+    decision,
+    provider,
+    operation: presented,
+    executedIntentHash,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -583,8 +616,16 @@ async function claimExecution(
     exactIntentHash: string;
     bindingHash: string;
   },
-): Promise<string> {
+): Promise<
+  { kind: 'claimed'; claimId: string } | { kind: 'settled'; result: EnforceExecutionResult }
+> {
   const claimId = newId('executionClaim');
+  // A savepoint, because losing the race is an expected outcome here rather
+  // than an error. Postgres aborts the whole transaction on a constraint
+  // violation, so without this the follow-up read of the winning claim would
+  // fail with "current transaction is aborted" and a 409 would surface as a
+  // 500 -- turning a correct refusal into what looks like a broken service.
+  await client.query('SAVEPOINT execution_claim');
   try {
     await client.query(
       `INSERT INTO scrutexity.execution_claims
@@ -602,24 +643,95 @@ async function claimExecution(
         input.bindingHash,
       ],
     );
+    await client.query('RELEASE SAVEPOINT execution_claim');
   } catch (error) {
+    await client.query('ROLLBACK TO SAVEPOINT execution_claim');
     if ((error as { code?: string }).code === '23505') {
-      metrics.replayAttempts.inc({ kind: 'execution_claim' });
-      throw refusal(
-        'REPLAY_DETECTED',
-        'this authorization decision has already been executed against',
-        {
-          organizationId: input.organizationId,
-          kind: 'EXECUTION_REPLAY',
-          subjectId: input.agentId,
-          detail: { decision_id: input.decisionId },
-        },
-      );
+      return resolveExistingClaim(client, input);
     }
     throw error;
   }
   metrics.executionsClaimed.inc({ provider: input.provider });
-  return claimId;
+  return { kind: 'claimed', claimId };
+}
+
+/**
+ * A claim already exists. What that means depends entirely on its state, and
+ * collapsing the three cases into one refusal was the shape this used to have.
+ *
+ *   EXECUTED / FAILED   a definite outcome exists -> return it
+ *   RECONCILED          an operator established the outcome -> return it
+ *   EXECUTING           the provider was reached and nobody knows the outcome
+ *   UNKNOWN             the provider did not answer
+ *
+ * The last two are the dangerous ones and they are not replays. A replay means
+ * "this was already done"; these mean "this may or may not have been done".
+ * Answering REPLAY_DETECTED to either would tell a caller the work is
+ * finished, when what is actually true is that somebody has to go and ask the
+ * bank. So they get their own code, and the provider is not called.
+ */
+async function resolveExistingClaim(
+  client: PoolClient,
+  input: { organizationId: string; decisionId: string; provider: string },
+): Promise<{ kind: 'settled'; result: EnforceExecutionResult }> {
+  const existing = await client.query(
+    `SELECT c.id, c.state, c.provider, c.external_reference, c.exact_intent_hash,
+            e.id AS execution_id, e.executed_intent_hash
+       FROM scrutexity.execution_claims c
+       LEFT JOIN scrutexity.execution_attempts e ON e.claim_id = c.id
+      WHERE c.decision_id = $1`,
+    [input.decisionId],
+  );
+  const row = existing.rows[0] as
+    | {
+        id: string;
+        state: string;
+        provider: string;
+        external_reference: string | null;
+        exact_intent_hash: string;
+        execution_id: string | null;
+        executed_intent_hash: string | null;
+      }
+    | undefined;
+
+  if (!row) {
+    // The unique violation says a row exists; not finding it means RLS hid it,
+    // which is a tenancy problem and not something to paper over by retrying.
+    throw new ScrutexityError('STATE_CONFLICT', 'an execution claim exists but is not readable');
+  }
+
+  if (row.state === 'EXECUTING' || row.state === 'UNKNOWN') {
+    metrics.executionsUnresolved.inc({ provider: row.provider });
+    throw refusal(
+      'EXECUTION_UNRESOLVED',
+      row.state === 'EXECUTING'
+        ? 'an execution against this authorization is in flight or was interrupted; it must be reconciled before anything further is attempted'
+        : 'the provider did not answer a previous execution against this authorization; it must be reconciled before anything further is attempted',
+      {
+        organizationId: input.organizationId,
+        kind: 'EXECUTION_RETRY_WHILE_UNRESOLVED',
+        detail: { decision_id: input.decisionId, claim_id: row.id, claim_state: row.state },
+      },
+      { disclose: true, details: { claim_id: row.id, state: row.state } },
+    );
+  }
+
+  metrics.replayAttempts.inc({ kind: 'execution_claim' });
+  return {
+    kind: 'settled',
+    result: {
+      execution_id: row.execution_id ?? row.id,
+      claim_id: row.id,
+      receipt_id: '',
+      status: row.state === 'EXECUTED' ? 'EXECUTED' : row.state === 'FAILED' ? 'FAILED' : 'UNKNOWN',
+      external_reference: row.external_reference,
+      provider: row.provider,
+      authorized_intent_hash: row.exact_intent_hash,
+      executed_intent_hash: row.executed_intent_hash ?? row.exact_intent_hash,
+      intent_verified: true,
+      replayed: true,
+    },
+  };
 }
 
 /**

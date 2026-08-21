@@ -38,6 +38,16 @@ export const ERROR_CODES = [
    * it into a generic 403 would bury the one signal nobody may miss.
    */
   'AUTHORITY_INVARIANT_VIOLATION',
+  /**
+   * A prior execution against this grant exists and has not been resolved.
+   *
+   * Distinct from REPLAY_DETECTED, which means "this was already done". This
+   * means "this may or may not have been done, and nobody knows yet" -- the
+   * state left behind when the provider was reached but the outcome was never
+   * recorded. Retrying is not safe; reconciling is the only correct move, and
+   * the caller has to be told which of the two it is looking at.
+   */
+  'EXECUTION_UNRESOLVED',
   'REPLAY_DETECTED',
   'IDEMPOTENCY_CONFLICT',
   'EVIDENCE_TAMPERED',
@@ -74,6 +84,7 @@ const STATUS: Record<ErrorCode, number> = {
   IDEMPOTENCY_CONFLICT: 409,
   EVIDENCE_TAMPERED: 422,
   AUTHORITY_INVARIANT_VIOLATION: 403,
+  EXECUTION_UNRESOLVED: 409,
   STATE_CONFLICT: 409,
   NOT_FOUND: 404,
   RATE_LIMITED: 429,
@@ -184,6 +195,8 @@ const GENERIC_MESSAGES: Record<ErrorCode, string> = {
     'The conditions changed since this action was authorised. It must be re-evaluated.',
   AUTHORITY_INVARIANT_VIOLATION:
     'This request was refused because an authority invariant did not hold. It has been recorded for review.',
+  EXECUTION_UNRESOLVED:
+    'A previous execution against this authorization has not been resolved. It must be reconciled against the provider before anything further is attempted.',
   SIGNAL_SIGNATURE_INVALID: 'The signal signature did not verify.',
   SIGNAL_KEY_UNKNOWN: 'No active signing key matches this signal.',
   POLICY_UNAVAILABLE: 'The policy could not be evaluated.',
