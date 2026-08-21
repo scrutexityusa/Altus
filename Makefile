@@ -21,6 +21,13 @@ help: ## Show this help
 install: ## Install workspace dependencies
 	pnpm install
 
+.PHONY: build
+build: ## Compile the workspace packages
+	# The scripts below import @scrutexity/core the same way the container
+	# image does -- through the package entry point, which is compiled output.
+	# Tests do not need this (they alias to source); anything run with tsx does.
+	pnpm exec tsc -b tsconfig.build.json
+
 .PHONY: up
 up: ## Start Postgres (docker compose, or a local cluster if the daemon is absent)
 	@if docker info >/dev/null 2>&1; then \
@@ -45,11 +52,11 @@ reset: ## Drop and recreate the schema, then migrate
 	pnpm exec tsx scripts/migrate.ts --reset
 
 .PHONY: seed
-seed: ## Seed the reference tenant and write development credentials
+seed: build ## Seed the reference tenant and write development credentials
 	pnpm exec tsx scripts/seed.ts
 
 .PHONY: dev
-dev: install up reset seed ## Bring up the full local environment
+dev: install build up reset seed ## Bring up the full local environment
 	@echo ""
 	@echo "  database  ready"
 	@echo "  tenant    seeded (credentials in .seed.local.json)"
@@ -68,7 +75,7 @@ web: ## Run the dashboard
 	pnpm --filter @scrutexity/web dev
 
 .PHONY: demo
-demo: ## Run the full treasury demo from a clean database
+demo: build ## Run the full treasury demo from a clean database
 	pnpm exec tsx scripts/demo.ts
 
 .PHONY: test
@@ -104,4 +111,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test demo ## Everything CI runs
+ci: install lint test build demo ## Everything CI runs

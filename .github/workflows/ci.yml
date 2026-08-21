@@ -70,8 +70,17 @@ jobs:
       - name: Migrate
         run: pnpm exec tsx scripts/migrate.ts
 
+      # No build step here on purpose: vitest aliases the workspace packages to
+      # their TypeScript source, so the suite is hermetic and can never pass
+      # against a stale dist.
       - name: Integration, security and contract tests
         run: pnpm exec vitest run services spec
+
+      # The demo scripts import @scrutexity/core through its package entry
+      # point, exactly as the container image does, so they need the compiled
+      # output that the tests deliberately bypass.
+      - name: Build the workspace packages
+        run: pnpm exec tsc -b tsconfig.build.json
 
       # The demo is a test. It runs from a clean database and asserts every
       # scene, so "the demo still works" is a build result, not a claim.
