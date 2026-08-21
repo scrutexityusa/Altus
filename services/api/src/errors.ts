@@ -46,6 +46,29 @@ export function toErrorResponse(
     return;
   }
 
+  // Framework-level rejections -- body too large, unsupported media type,
+  // malformed JSON -- already carry the right status. Collapsing them into a
+  // 500 would tell a caller the service broke when in fact it refused them.
+  const framework = error as { statusCode?: number; code?: string } | null;
+  if (
+    typeof framework?.statusCode === 'number' &&
+    framework.statusCode >= 400 &&
+    framework.statusCode < 500 &&
+    typeof framework.code === 'string' &&
+    framework.code.startsWith('FST_')
+  ) {
+    logger.info({ requestId, code: framework.code, status: framework.statusCode }, 'request rejected');
+    reply.code(framework.statusCode).send({
+      error: {
+        code: framework.statusCode === 429 ? 'RATE_LIMITED' : 'INVALID_REQUEST',
+        reason_code: framework.code,
+        message: 'The request is invalid.',
+        request_id: requestId,
+      },
+    });
+    return;
+  }
+
   // Postgres raises this when an append-only trigger or an RLS policy blocks a
   // write. Either is a bug or an attack; neither is described to the caller.
   const pgCode = (error as { code?: string } | null)?.code;

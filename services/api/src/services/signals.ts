@@ -73,17 +73,8 @@ export async function ingestSignal(client: PoolClient, keys: EvidenceKeys, input
 
   const signalId = newId('signal');
 
-  // A newer assertion from the same source about the same subject replaces the
-  // older one, rather than accumulating alongside it.
-  const superseded = await client.query(
-    `UPDATE scrutexity.risk_signals
-        SET superseded_at = now(), superseded_by_id = $1
-      WHERE organization_id = $2 AND subject_type = $3 AND subject_id = $4
-        AND signal_type = $5 AND source = $6 AND superseded_at IS NULL
-      RETURNING id`,
-    [signalId, input.organizationId, input.subjectType, input.subjectId, input.signalType, input.source],
-  );
-
+  // Insert before superseding: superseded_by_id points at this row, so the
+  // row has to exist first or the foreign key rejects the whole ingestion.
   const inserted = await client.query(
     `INSERT INTO scrutexity.risk_signals
        (id, organization_id, subject_type, subject_id, signal_type, value, confidence,
@@ -103,6 +94,19 @@ export async function ingestSignal(client: PoolClient, keys: EvidenceKeys, input
       issuedAt,
       expiresAt,
     ],
+  );
+
+  // A newer assertion from the same source about the same subject replaces the
+  // older one rather than accumulating alongside it, so a source cannot pin an
+  // agent's authority down by shouting.
+  const superseded = await client.query(
+    `UPDATE scrutexity.risk_signals
+        SET superseded_at = now(), superseded_by_id = $1
+      WHERE organization_id = $2 AND subject_type = $3 AND subject_id = $4
+        AND signal_type = $5 AND source = $6 AND superseded_at IS NULL
+        AND id <> $1
+      RETURNING id`,
+    [signalId, input.organizationId, input.subjectType, input.subjectId, input.signalType, input.source],
   );
 
   const receipt = await appendReceipt(client, keys, {

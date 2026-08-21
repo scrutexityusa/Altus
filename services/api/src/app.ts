@@ -28,8 +28,17 @@ const tracer = trace.getTracer('scrutexity-api');
  */
 const PUBLIC_PATHS = new Set(['/health', '/ready', '/metrics']);
 
-export async function buildApp(overrides: Partial<Config> = {}): Promise<App> {
-  const config = { ...loadConfig(), ...overrides } as Config;
+/**
+ * Overrides are merged into the environment *before* validation, not onto the
+ * parsed result. A test or an embedded harness must go through exactly the
+ * same configuration checks as production; a config that skipped validation
+ * because it came from an argument would be a config nobody had checked.
+ */
+export async function buildApp(overrides: Record<string, string | number> = {}): Promise<App> {
+  const config = loadConfig({
+    ...process.env,
+    ...Object.fromEntries(Object.entries(overrides).map(([key, value]) => [key, String(value)])),
+  });
   const logger = createLogger(config);
   const db = createDatabase(config);
   const keys = loadEvidenceKeys(config);

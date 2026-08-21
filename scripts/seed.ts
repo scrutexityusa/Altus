@@ -156,7 +156,7 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
     // -- Credentials --------------------------------------------------------
     const tokens: Record<string, string> = {};
     const credentialSpecs = [
-      { key: 'admin', type: 'user' as const, principal: users['admin']!, scopes: ['read', 'admin:write', 'leases:write', 'policies:write', 'signals:write'] },
+      { key: 'admin', type: 'user' as const, principal: users['admin']!, scopes: ['read', 'admin:write', 'leases:write', 'policies:write', 'signals:write', 'authorization:evaluate'] },
       { key: 'treasurer', type: 'user' as const, principal: users['treasurer']!, scopes: ['read', 'approvals:write'] },
       { key: 'cfo', type: 'user' as const, principal: users['cfo']!, scopes: ['read', 'approvals:write'] },
       { key: 'treasury_agent', type: 'agent' as const, principal: agents['treasury']!, scopes: ['read', 'authorization:evaluate', 'delegation:create'] },

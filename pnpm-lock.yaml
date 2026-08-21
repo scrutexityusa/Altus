@@ -42,6 +42,12 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
+  packages/sdk:
+    dependencies:
+      '@scrutexity/core':
+        specifier: workspace:*
+        version: link:../core
+
   services/api:
     dependencies:
       '@opentelemetry/api':

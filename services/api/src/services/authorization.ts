@@ -486,19 +486,30 @@ async function loadActivePolicy(
     | undefined;
   if (!row) return null;
 
-  // Policy versions are immutable, so caching one by its content hash is safe
-  // for as long as the hash matches -- and never longer.
+  // The integrity check runs on every load, not only on a cache miss. Caching
+  // the parsed document is a parsing optimisation; it must never become the
+  // reason a tampered policy row goes unnoticed. Hashing the stored JSON is
+  // cheap next to the round trip that fetched it.
+  const storedHash = hashObject(row.content);
+  if (storedHash !== row.content_hash) {
+    metrics.policyEvaluationFailures.inc({ reason: 'policy_hash_mismatch' });
+    throw new ScrutexityError('POLICY_UNAVAILABLE', 'stored policy version failed its integrity check', {
+      internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: storedHash },
+    });
+  }
+
   const cached = policyCache.get(row.id);
-  if (cached && cached.hash === row.content_hash) {
+  if (cached && cached.hash === storedHash) {
     metrics.policyCache.inc({ result: 'hit' });
     return { policy_id: row.policy_id, policy_version_id: row.id, document: cached.document };
   }
   metrics.policyCache.inc({ result: 'miss' });
+
   const { document, hash } = loadPolicyDocument(row.content);
   if (hash !== row.content_hash) {
-    // The stored document no longer hashes to its recorded digest. Something
-    // wrote to an immutable row; refuse to evaluate against it.
-    metrics.policyEvaluationFailures.inc({ reason: 'policy_hash_mismatch' });
+    // The document parses, but not back to the digest it was activated under.
+    // Refuse rather than evaluate against something nobody approved.
+    metrics.policyEvaluationFailures.inc({ reason: 'policy_reparse_mismatch' });
     throw new ScrutexityError('POLICY_UNAVAILABLE', 'stored policy version failed its integrity check', {
       internal: { policy_version_id: row.id, recorded: row.content_hash, recomputed: hash },
     });

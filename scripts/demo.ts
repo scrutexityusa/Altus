@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     NODE_ENV: 'development',
     DATABASE_URL: APP_URL,
     LOG_LEVEL: 'silent',
-  } as never);
+  });
   await app.server.listen({ port: 0, host: '127.0.0.1' });
   const address = app.server.addresses()[0]!;
   const base = `http://127.0.0.1:${address.port}`;
