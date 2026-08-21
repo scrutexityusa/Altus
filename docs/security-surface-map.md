@@ -271,8 +271,8 @@ Section 37 says comments are not controls. Two current claims fail that test:
    unnamed object-level hole the first sweep missed.
 2. ~~**G-4**~~ — **done.** Postcondition on every ALLOW, on both the
    autonomous and the post-approval path; closed G-3 with it.
-3. **G-2** — issuable authority. The largest design change, and the one that
-   makes the top of the theorem true rather than assumed.
+3. ~~**G-2**~~ — **done.** Ceilings live in the policy, so changing who may
+   grant what needs a reviewed, hash-checked, dual-control policy change.
 4. **G-12** — database time for every expiry comparison, with a skew test.
 5. **G-5** — Ed25519-only in production; secret provider abstraction.
 6. G-15, G-6, G-7, G-1, G-11, G-13 in that order.

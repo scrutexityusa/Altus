@@ -138,6 +138,122 @@
           },
           "additionalProperties": false
         },
+        "issuance": {
+          "type": "object",
+          "properties": {
+            "enforced": {
+              "type": "boolean",
+              "default": true
+            },
+            "ceilings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "grant": {
+                    "type": "object",
+                    "properties": {
+                      "actions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "minItems": 1
+                      },
+                      "resources": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "minItems": 1
+                        },
+                        "default": {}
+                      },
+                      "constraints": {
+                        "type": "object",
+                        "additionalProperties": {},
+                        "default": {}
+                      }
+                    },
+                    "required": [
+                      "actions"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "role",
+                  "grant"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 50,
+              "default": []
+            }
+          },
+          "additionalProperties": false,
+          "description": "The ceiling each role may issue authority within. A role not named here may issue nothing."
+        },
+        "intent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "allowed_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbidden_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "intents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "allowed_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "forbidden_actions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 50
+        },
+        "intent_required": {
+          "type": "boolean"
+        },
         "rules": {
           "type": "array",
           "items": {

@@ -1029,3 +1029,132 @@ describe('the authority invariants are enforced at runtime', () => {
     expect(result.body.decision).toBe('ALLOW');
   });
 });
+
+/**
+ * ============================================================================
+ * Issuable authority — the top of the theorem.
+ * ============================================================================
+ *
+ * Containment guarantees a delegated grant never exceeds its parent. A root
+ * lease has no parent, so before the issuance ceiling existed the whole chain
+ * hung beneath an unbounded root: `leases:write` alone could mint anything.
+ *
+ * These tests are all about what a *legitimate* credential cannot do. The
+ * attacker here is not an outsider — it is a valid human credential reaching
+ * past the authority its role actually carries.
+ */
+describe('issuance is bounded by the role, not by the scope', () => {
+  const issue = (token: string, grant: Record<string, unknown>) =>
+    h.call('POST', '/v1/authority-leases', token, {
+      agent_id: 'treasury-agent',
+      grant,
+      ttl_seconds: 3600,
+    });
+
+  const payingGrant = {
+    actions: ['wire.execute'],
+    resources: { bank_account: ['acct_001'] },
+    constraints: {
+      max_amount: { currency: 'USD', amount: '10000.00' },
+      currencies: ['USD'],
+      allowed_counterparties: ['cp_100'],
+    },
+  };
+
+  it('lets treasury_admin issue within its ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, payingGrant);
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+  });
+
+  it('refuses a treasurer trying to mint a paying agent', async () => {
+    // The treasurer holds `leases:write`, so this is not a scope refusal --
+    // the endpoint opens for them. It is the ceiling that stops them: their
+    // role may provision read-only agents and nothing that moves money.
+    //
+    // This is the whole argument for separating the two. A compromised
+    // treasurer credential cannot mint an agent that pays.
+    const response = await issue(h.tenant.tokens['treasurer']!, payingGrant);
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('lets that same treasurer issue the read-only authority their role carries', async () => {
+    // A ceiling that refuses everything is not a control, it is an outage.
+    const response = await issue(h.tenant.tokens['treasurer']!, {
+      actions: ['counterparty.read', 'account.read'],
+      resources: { counterparty: ['cp_100'], bank_account: ['acct_001'] },
+      constraints: {
+        max_amount: { currency: 'USD', amount: '0.00' },
+        currencies: ['USD'],
+        allowed_counterparties: ['cp_100'],
+      },
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+  });
+
+  it('refuses an amount above the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      constraints: {
+        ...payingGrant.constraints,
+        max_amount: { currency: 'USD', amount: '5000000.00' },
+      },
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses an action outside the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      actions: ['wire.modify'],
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses a resource outside the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['acct_999'] },
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses a wildcard that would swallow the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['*'] },
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it('names the axis that failed but not the ceiling itself', async () => {
+    // Enough for an operator to correct the request; not enough to map the
+    // organisation's authority model by probing it.
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['acct_999'] },
+    });
+    const body = JSON.stringify(response.body);
+    expect(body).toContain('resources');
+    expect(body).not.toContain('acct_001');
+    expect(body).not.toContain('500000');
+  });
+
+  it('records a security event for the attempt', async () => {
+    let events: Record<string, unknown>[] = [];
+    await asOwner(async (client) => {
+      const rows = await client.query(
+        `SELECT subject_id, detail FROM scrutexity.security_events
+          WHERE kind = 'ISSUANCE_EXCEEDS_CEILING' ORDER BY created_at DESC`,
+      );
+      events = rows.rows as Record<string, unknown>[];
+    });
+    expect(events.length, 'the refusal rolled back its own evidence').toBeGreaterThan(0);
+    const detail = events[0]!['detail'] as { issuer_roles: string[]; axes: string[] };
+    expect(detail.issuer_roles).toContain('treasury_admin');
+    expect(detail.axes.length).toBeGreaterThan(0);
+  });
+});

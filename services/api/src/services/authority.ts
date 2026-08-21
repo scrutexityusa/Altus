@@ -3,6 +3,7 @@ import {
   ScrutexityError,
   addSeconds,
   authorizeDelegation,
+  authorizeIssuance,
   loadPolicyDocument,
   newId,
   normalizeGrant,
@@ -25,6 +26,38 @@ export interface IssueLeaseInput {
   grantType?: 'REUSABLE' | 'SINGLE_USE';
   purpose?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * The principal asking to issue. Required: issuance is where authority
+   * enters the system, and it is the one place with no parent grant to be
+   * contained by, so the bound has to come from somewhere else.
+   */
+  issuer: { type: 'user' | 'agent' | 'service'; id: string };
+}
+
+/**
+ * The roles the issuing principal holds.
+ *
+ * Read from the database on every issuance rather than carried on the
+ * credential, so revoking someone's role takes effect on their next request
+ * instead of whenever their token happens to expire. Issuance is rare and
+ * consequential; one extra query is the right trade.
+ *
+ * A non-user principal holds no organisational role and therefore no issuance
+ * ceiling. That is deliberate: a service or an agent minting root authority is
+ * exactly the shape this control exists to prevent, and the empty list makes
+ * `authorizeIssuance` refuse it by the ordinary path rather than a special
+ * case.
+ */
+async function loadIssuerRoles(
+  client: PoolClient,
+  issuer: { type: 'user' | 'agent' | 'service'; id: string },
+): Promise<string[]> {
+  if (issuer.type !== 'user') return [];
+  const result = await client.query(
+    "SELECT roles FROM scrutexity.users WHERE id = $1 AND status = 'ACTIVE'",
+    [issuer.id],
+  );
+  return (result.rows[0]?.roles as string[] | undefined) ?? [];
 }
 
 export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: IssueLeaseInput) {
@@ -39,6 +72,45 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
   }
 
   const policyVersion = await activePolicyVersion(client, input.organizationId);
+
+  // -- The top of the theorem ----------------------------------------------
+  //
+  // Every other containment relation has a parent to be checked against. A
+  // root lease does not, so without this the whole chain hangs beneath an
+  // unbounded root: `leases:write` alone could mint any authority at all.
+  const issuerRoles = await loadIssuerRoles(client, input.issuer);
+  const issuance = authorizeIssuance(
+    { issuer_roles: issuerRoles, grant },
+    loadPolicyDocument(policyVersion.content).document,
+  );
+  if (!issuance.ok) {
+    throw new ScrutexityError('DELEGATION_EXCEEDS_PARENT', issuance.message, {
+      disclose: true,
+      reasonCode: issuance.reason_code,
+      // Axes only, matching what the delegation path discloses -- enough for
+      // an operator to correct the request, not enough to enumerate the
+      // ceiling by probing it.
+      details: {
+        violations: issuance.violations.map((v) => ({ axis: v.axis, dimension: v.dimension })),
+      },
+      internal: {
+        securityEvent: {
+          organizationId: input.organizationId,
+          kind: 'ISSUANCE_EXCEEDS_CEILING',
+          subjectId: input.issuer.id,
+          detail: {
+            reason_code: issuance.reason_code,
+            issuer_type: input.issuer.type,
+            issuer_roles: issuerRoles,
+            target_agent_id: input.agentId,
+            axes: issuance.violations.map((v) => `${v.axis}:${v.dimension}`),
+            policy_version_id: policyVersion.id,
+          },
+        },
+      },
+    });
+  }
+
   const now = new Date();
   const leaseId = newId('lease');
 

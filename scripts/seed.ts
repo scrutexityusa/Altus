@@ -58,7 +58,11 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
         key: 'admin',
         email: 'ops.admin@acme.example',
         name: 'Dana Okafor',
-        roles: ['admin', 'policy_author'],
+        // treasury_admin is what the policy's issuance ceiling names. Being
+        // an org admin is not by itself authority to provision paying agents:
+        // the scope lets them call the endpoint, the role bounds what may
+        // come out of it.
+        roles: ['admin', 'policy_author', 'treasury_admin'],
       },
       {
         key: 'reviewer',
@@ -240,7 +244,12 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
         principal: users['treasurer']!,
         // audit:read so an approver can see the security event log and the
         // policy they are approving under. Never granted to an agent.
-        scopes: ['read', 'audit:read', 'approvals:write'],
+        //
+        // leases:write is deliberate, and it is the point of the issuance
+        // ceiling: a treasurer may provision read-only agents, and the scope
+        // alone does not let them mint a paying one. The scope opens the
+        // endpoint; the role bounds what may come out of it.
+        scopes: ['read', 'audit:read', 'approvals:write', 'leases:write'],
       },
       {
         key: 'cfo',

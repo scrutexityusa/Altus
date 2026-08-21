@@ -32,6 +32,7 @@ export * from './intent.js';
 export * from './corrective.js';
 export * from './approval.js';
 export * from './delegation.js';
+export * from './issuance.js';
 export * from './evaluate.js';
 export * from './receipts.js';
 export * from './explain.js';

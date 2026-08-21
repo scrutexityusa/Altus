@@ -189,6 +189,49 @@ const AuthoredPolicy = z
       })
       .strict()
       .optional(),
+    issuance: z
+      .object({
+        enforced: z.boolean().default(true),
+        ceilings: z
+          .array(
+            z
+              .object({
+                role: z.string().min(1).max(64),
+                grant: z
+                  .object({
+                    actions: z.array(z.string()).min(1),
+                    resources: z.record(z.string(), z.array(z.string()).min(1)).default({}),
+                    constraints: z.record(z.string(), z.unknown()).default({}),
+                  })
+                  .strict(),
+              })
+              .strict(),
+          )
+          .max(50)
+          .default([]),
+      })
+      .strict()
+      .optional()
+      .describe(
+        'The ceiling each role may issue authority within. A role not named here may issue nothing.',
+      ),
+    intent: z.string().min(1).max(200).optional(),
+    allowed_actions: z.array(z.string()).optional(),
+    forbidden_actions: z.array(z.string()).optional(),
+    intents: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            description: z.string().optional(),
+            allowed_actions: z.array(z.string()).default([]),
+            forbidden_actions: z.array(z.string()).default([]),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
+    intent_required: z.boolean().optional(),
     rules: z.array(AuthoredRule).min(1).max(500),
   })
   .strict()

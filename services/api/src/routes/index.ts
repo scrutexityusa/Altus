@@ -278,16 +278,17 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/authority-leases', async (request, reply) => {
     requireScope(request.principal, SCOPES.leaseWrite);
     const body = CreateLeaseSchema.parse(request.body);
-    const { status, body: payload } = await mutate(
-      request as never,
-      'POST /v1/authority-leases',
-      async (client) => {
+    // An attempt to issue beyond the ceiling is a security event, and the
+    // transaction that produced it is about to roll back.
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/authority-leases', async (client) => {
         const result = await issueLease(client, keys, {
           organizationId: request.principal.organization_id,
           agentId: await resolveAgentId(client, body.agent_id),
           grant: body.grant,
           ttlSeconds: body.ttl_seconds,
           issuedByUserId: request.principal.type === 'user' ? request.principal.id : null,
+          issuer: { type: request.principal.type, id: request.principal.id },
           revocable: body.revocable,
           grantType: body.grant_type,
           purpose: body.purpose ?? null,
@@ -297,7 +298,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           status: 201,
           body: { authority_lease: result.lease, receipt_id: result.receipt_id },
         };
-      },
+      }),
     );
     reply.code(status).send(payload);
   });

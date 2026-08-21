@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { MoneySchema, compareMoney, formatMoneyWithCurrency, type Money } from '../money.js';
+import {
+  MoneyInputSchema,
+  MoneySchema,
+  compareMoney,
+  formatMoneyWithCurrency,
+  type Money,
+} from '../money.js';
 
 /**
  * ============================================================================
@@ -112,7 +118,18 @@ const StringSetSchema = z.array(z.string().min(1)).min(1);
 
 export const ConstraintsSchema = z
   .object({
-    max_amount: MoneySchema.optional(),
+    /**
+     * Either form is accepted and both normalise to exact minor units:
+     *
+     *   { currency: USD, amount: "500000.00" }   authored -- policies, API callers
+     *   { currency: USD, amountMinor: "50000000" }   stored -- re-parsed rows
+     *
+     * The stored form is tried first because re-parsing a persisted grant is
+     * the common path, and a policy document must re-parse to itself byte for
+     * byte or its content hash changes and the evidence chain stops meaning
+     * anything.
+     */
+    max_amount: z.union([MoneySchema, MoneyInputSchema]).optional(),
     currencies: StringSetSchema.optional(),
     allowed_counterparties: StringSetSchema.optional(),
     denied_counterparties: StringSetSchema.optional(),

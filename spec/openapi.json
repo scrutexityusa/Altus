@@ -344,23 +344,48 @@
                 "type": "object",
                 "properties": {
                   "max_amount": {
-                    "type": "object",
-                    "properties": {
-                      "currency": {
-                        "type": "string",
-                        "minLength": 3,
-                        "maxLength": 3
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "pattern": "^-?\\d+$"
+                          }
+                        },
+                        "required": [
+                          "currency",
+                          "amountMinor"
+                        ],
+                        "additionalProperties": false
                       },
-                      "amountMinor": {
-                        "type": "string",
-                        "pattern": "^-?\\d+$"
+                      {
+                        "type": "object",
+                        "properties": {
+                          "amount": {
+                            "type": [
+                              "string",
+                              "number"
+                            ]
+                          },
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          }
+                        },
+                        "required": [
+                          "amount",
+                          "currency"
+                        ],
+                        "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "currency",
-                      "amountMinor"
-                    ],
-                    "additionalProperties": false
+                    ]
                   },
                   "currencies": {
                     "type": "array",
@@ -414,23 +439,48 @@
             "type": "object",
             "properties": {
               "max_amount": {
-                "type": "object",
-                "properties": {
-                  "currency": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 3
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      },
+                      "amountMinor": {
+                        "type": "string",
+                        "pattern": "^-?\\d+$"
+                      }
+                    },
+                    "required": [
+                      "currency",
+                      "amountMinor"
+                    ],
+                    "additionalProperties": false
                   },
-                  "amountMinor": {
-                    "type": "string",
-                    "pattern": "^-?\\d+$"
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amount": {
+                        "type": [
+                          "string",
+                          "number"
+                        ]
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3
+                      }
+                    },
+                    "required": [
+                      "amount",
+                      "currency"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "currency",
-                  "amountMinor"
-                ],
-                "additionalProperties": false
+                ]
               },
               "currencies": {
                 "type": "array",
@@ -525,23 +575,48 @@
                 "type": "object",
                 "properties": {
                   "max_amount": {
-                    "type": "object",
-                    "properties": {
-                      "currency": {
-                        "type": "string",
-                        "minLength": 3,
-                        "maxLength": 3
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          },
+                          "amountMinor": {
+                            "type": "string",
+                            "pattern": "^-?\\d+$"
+                          }
+                        },
+                        "required": [
+                          "currency",
+                          "amountMinor"
+                        ],
+                        "additionalProperties": false
                       },
-                      "amountMinor": {
-                        "type": "string",
-                        "pattern": "^-?\\d+$"
+                      {
+                        "type": "object",
+                        "properties": {
+                          "amount": {
+                            "type": [
+                              "string",
+                              "number"
+                            ]
+                          },
+                          "currency": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 3
+                          }
+                        },
+                        "required": [
+                          "amount",
+                          "currency"
+                        ],
+                        "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "currency",
-                      "amountMinor"
-                    ],
-                    "additionalProperties": false
+                    ]
                   },
                   "currencies": {
                     "type": "array",
@@ -675,23 +750,48 @@
                         "type": "object",
                         "properties": {
                           "max_amount": {
-                            "type": "object",
-                            "properties": {
-                              "currency": {
-                                "type": "string",
-                                "minLength": 3,
-                                "maxLength": 3
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "currency": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 3
+                                  },
+                                  "amountMinor": {
+                                    "type": "string",
+                                    "pattern": "^-?\\d+$"
+                                  }
+                                },
+                                "required": [
+                                  "currency",
+                                  "amountMinor"
+                                ],
+                                "additionalProperties": false
                               },
-                              "amountMinor": {
-                                "type": "string",
-                                "pattern": "^-?\\d+$"
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "amount": {
+                                    "type": [
+                                      "string",
+                                      "number"
+                                    ]
+                                  },
+                                  "currency": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 3
+                                  }
+                                },
+                                "required": [
+                                  "amount",
+                                  "currency"
+                                ],
+                                "additionalProperties": false
                               }
-                            },
-                            "required": [
-                              "currency",
-                              "amountMinor"
-                            ],
-                            "additionalProperties": false
+                            ]
                           },
                           "currencies": {
                             "type": "array",
@@ -1355,23 +1455,48 @@
                     "type": "object",
                     "properties": {
                       "max_amount": {
-                        "type": "object",
-                        "properties": {
-                          "currency": {
-                            "type": "string",
-                            "minLength": 3,
-                            "maxLength": 3
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3
+                              },
+                              "amountMinor": {
+                                "type": "string",
+                                "pattern": "^-?\\d+$"
+                              }
+                            },
+                            "required": [
+                              "currency",
+                              "amountMinor"
+                            ],
+                            "additionalProperties": false
                           },
-                          "amountMinor": {
-                            "type": "string",
-                            "pattern": "^-?\\d+$"
+                          {
+                            "type": "object",
+                            "properties": {
+                              "amount": {
+                                "type": [
+                                  "string",
+                                  "number"
+                                ]
+                              },
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3
+                              }
+                            },
+                            "required": [
+                              "amount",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
-                        },
-                        "required": [
-                          "currency",
-                          "amountMinor"
-                        ],
-                        "additionalProperties": false
+                        ]
                       },
                       "currencies": {
                         "type": "array",
@@ -1519,23 +1644,48 @@
                     "type": "object",
                     "properties": {
                       "max_amount": {
-                        "type": "object",
-                        "properties": {
-                          "currency": {
-                            "type": "string",
-                            "minLength": 3,
-                            "maxLength": 3
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3
+                              },
+                              "amountMinor": {
+                                "type": "string",
+                                "pattern": "^-?\\d+$"
+                              }
+                            },
+                            "required": [
+                              "currency",
+                              "amountMinor"
+                            ],
+                            "additionalProperties": false
                           },
-                          "amountMinor": {
-                            "type": "string",
-                            "pattern": "^-?\\d+$"
+                          {
+                            "type": "object",
+                            "properties": {
+                              "amount": {
+                                "type": [
+                                  "string",
+                                  "number"
+                                ]
+                              },
+                              "currency": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 3
+                              }
+                            },
+                            "required": [
+                              "amount",
+                              "currency"
+                            ],
+                            "additionalProperties": false
                           }
-                        },
-                        "required": [
-                          "currency",
-                          "amountMinor"
-                        ],
-                        "additionalProperties": false
+                        ]
                       },
                       "currencies": {
                         "type": "array",

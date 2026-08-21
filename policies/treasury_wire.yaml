@@ -39,6 +39,61 @@ failure_modes:
   signal_unavailable: FAIL_CLOSED
   enforcement_unavailable: FAIL_CLOSED
 
+# =============================================================================
+# Issuable authority -- the top of the theorem.
+# =============================================================================
+#
+# Containment guarantees a delegated grant never exceeds its parent. But a root
+# lease is issued from nothing and has no parent, so without a ceiling here the
+# whole chain hangs beneath an unbounded root: anyone holding the leases:write
+# scope could mint any authority at all.
+#
+# A scope protects an endpoint. This governs what may come out of it. They are
+# deliberately different things -- collapsing them is how a treasury system
+# ends up with one boolean between an intern and a $10m wire.
+#
+# A role not named here may issue nothing. That is the correct direction: a
+# policy that forgot to say fails closed.
+issuance:
+  enforced: true
+  ceilings:
+    # Treasury operations may hand agents payment authority, capped well below
+    # the amounts policy would escalate anyway. The ceiling is on what may be
+    # *granted*; the rules below still govern what may be *done* with it.
+    - role: treasury_admin
+      grant:
+        actions:
+          - wire.create
+          - wire.submit
+          - wire.execute
+          - wire.read
+          - counterparty.read
+          - account.read
+        resources:
+          bank_account: [acct_001, acct_002]
+          counterparty: [cp_100, cp_101]
+        constraints:
+          max_amount: { currency: USD, amount: '500000.00' }
+          currencies: [USD]
+          allowed_counterparties: [cp_100, cp_101]
+
+    # A treasurer approves; they do not provision. Read-only authority is the
+    # most they may hand to a machine, so a compromised treasurer credential
+    # cannot mint a paying agent.
+    - role: treasurer
+      grant:
+        actions:
+          - wire.read
+          - counterparty.read
+          - account.read
+        resources:
+          bank_account: [acct_001, acct_002]
+          counterparty: [cp_100, cp_101]
+        constraints:
+          max_amount: { currency: USD, amount: '0.00' }
+          currencies: [USD]
+          allowed_counterparties: [cp_100, cp_101]
+
 delegation:
   enabled: true
   max_depth: 2
