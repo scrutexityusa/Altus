@@ -1,0 +1,17 @@
+{
+  "name": "@scrutexity/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": { "build": "tsc -b", "start": "node dist/server.js" },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@scrutexity/core": "workspace:*",
+    "fastify": "^5.2.0",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": { "@types/pg": "^8.11.10" }
+}

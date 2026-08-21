@@ -2,6 +2,7 @@
   "name": "scrutexity",
   "private": true,
   "version": "0.1.0",
+  "type": "module",
   "description": "Machine authority and runtime authorization control plane",
   "license": "MIT",
   "packageManager": "pnpm@10.33.0",
@@ -29,7 +30,10 @@
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "@scrutexity/core": "workspace:*",
+    "pg": "^8.13.1",
+    "@types/pg": "^8.11.10"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

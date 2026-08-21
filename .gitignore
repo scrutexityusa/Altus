@@ -8,3 +8,4 @@ coverage/
 .env.local
 .DS_Store
 .pgdata/
+.seed.local.json

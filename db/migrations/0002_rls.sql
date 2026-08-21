@@ -35,7 +35,7 @@ DO $$
 DECLARE
   t TEXT;
   tenant_tables TEXT[] := ARRAY[
-    'users','agents','api_credentials','resources','policies','policy_versions',
+    'users','agents','resources','policies','policy_versions',
     'policy_version_reviews','authority_leases','delegations','risk_signals',
     'authorization_requests','authorization_decisions','approval_requests',
     'approvals','execution_attempts','receipts','receipt_chain_heads',
@@ -61,10 +61,23 @@ ALTER TABLE organizations FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON organizations
   USING (id = scrutexity.current_org_id());
 
--- Credential lookup happens before a tenant is known: authentication resolves
--- the tenant from the token, so it cannot itself be tenant-scoped. It is
--- restricted to a hash equality probe over a dedicated SECURITY DEFINER
--- function rather than opening the table.
+-- Credential lookup happens *before* a tenant is known -- authentication is
+-- what resolves the tenant from the token -- so this one table cannot be
+-- tenant-scoped like the rest. It is handled differently and deliberately:
+--
+--   * RLS is ENABLED but not FORCEd, so the owner (and therefore a
+--     SECURITY DEFINER function) can read it. FORCE would apply to the owner
+--     too and would make authentication itself impossible.
+--   * the application role is given NO privileges on the table at all, so the
+--     only way in is the single-row prefix probe below.
+--   * the tenant policy still stands for any future role that is granted
+--     access, so the safe default survives a later change.
+ALTER TABLE api_credentials ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON api_credentials
+  USING (organization_id = scrutexity.current_org_id())
+  WITH CHECK (organization_id = scrutexity.current_org_id());
+REVOKE ALL ON api_credentials FROM scrutexity_app;
+
 CREATE OR REPLACE FUNCTION scrutexity.resolve_credential(p_prefix TEXT)
 RETURNS TABLE (
   id TEXT, organization_id TEXT, principal_type scrutexity.principal_type,

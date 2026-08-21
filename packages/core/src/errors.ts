@@ -75,37 +75,59 @@ const DISCLOSABLE = new Set<ErrorCode>([
 export interface ErrorBody {
   error: {
     code: ErrorCode;
+    /**
+     * The specific, machine-readable cause within `code`. Reason codes are a
+     * closed documented vocabulary, so returning one leaks nothing the code
+     * did not already say -- and without it a caller cannot tell "you may not
+     * delegate this action" from "you may not call this endpoint".
+     */
+    reason_code?: string;
     message: string;
     details?: unknown;
     request_id?: string;
   };
 }
 
+export interface ScrutexityErrorOptions {
+  reasonCode?: string;
+  details?: unknown;
+  /**
+   * Opt in to returning `message` and `details` for a code that is otherwise
+   * generic. Set it only when the detail is the caller's own input reflected
+   * back -- never for anything derived from another tenant's data or from
+   * policy the caller cannot already read.
+   */
+  disclose?: boolean;
+  internal?: unknown;
+  cause?: unknown;
+}
+
 export class ScrutexityError extends Error {
   readonly code: ErrorCode;
+  readonly reasonCode: string | undefined;
   readonly status: number;
   readonly details: unknown;
+  readonly disclose: boolean;
   /** Never serialised to a client; carried for the structured log record. */
   readonly internal: unknown;
 
-  constructor(
-    code: ErrorCode,
-    message: string,
-    options: { details?: unknown; internal?: unknown; cause?: unknown } = {},
-  ) {
+  constructor(code: ErrorCode, message: string, options: ScrutexityErrorOptions = {}) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'ScrutexityError';
     this.code = code;
+    this.reasonCode = options.reasonCode;
     this.status = STATUS[code];
     this.details = options.details;
+    this.disclose = options.disclose ?? false;
     this.internal = options.internal;
   }
 
   toBody(requestId?: string): ErrorBody {
-    const disclose = DISCLOSABLE.has(this.code);
+    const disclose = this.disclose || DISCLOSABLE.has(this.code);
     return {
       error: {
         code: this.code,
+        ...(this.reasonCode ? { reason_code: this.reasonCode } : {}),
         message: disclose ? this.message : GENERIC_MESSAGES[this.code],
         ...(disclose && this.details !== undefined ? { details: this.details } : {}),
         ...(requestId ? { request_id: requestId } : {}),
