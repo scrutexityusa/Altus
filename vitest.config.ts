@@ -26,6 +26,10 @@ export default defineConfig({
   test: {
     include: ['packages/**/*.test.ts', 'services/**/*.test.ts', 'spec/**/*.test.ts'],
     environment: 'node',
+    // Provisions and drops a database for this run. Tests never touch the
+    // development database -- they disable append-only triggers and reset
+    // schemas, which is not something to point at data anyone cares about.
+    globalSetup: ['./test/global-setup.ts'],
     // Integration tests share one Postgres database; running files in parallel
     // would interleave tenant fixtures. Correctness beats a faster suite.
     fileParallelism: false,

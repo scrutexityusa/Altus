@@ -25,6 +25,8 @@ export const ID_PREFIXES = {
   approval: 'apv',
   execution: 'exec',
   receipt: 'rcpt',
+  securityEvent: 'sec',
+  signalKey: 'sigkey',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIXES;

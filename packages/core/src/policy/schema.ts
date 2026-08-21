@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { toDecimalString } from '../decimal.js';
 import { MoneyInputSchema, MoneySchema } from '../money.js';
 import { ACTION_PATTERN, ConstraintsSchema } from '../authority/grant.js';
+import { IntentDeclarationSchema } from '../intent.js';
 
 /**
  * ============================================================================
@@ -295,9 +296,50 @@ export const PolicyDocumentSchema = z
       })
       .strict()
       .default({}),
+    /**
+     * Intent binding (see intent.ts). Two authoring forms normalise to one
+     * stored shape:
+     *
+     *   intent: execute wire transfers        # shorthand: one intent
+     *   allowed_actions: [wire.create]
+     *   forbidden_actions: [wire.execute]
+     *
+     *   intents:                              # explicit: several named intents
+     *     - id: reconcile_cash_position
+     *       allowed_actions: [account.read]
+     *
+     * The shorthand exists because most policies govern a single objective and
+     * should not have to say so twice.
+     */
+    intent: z.string().min(1).max(200).optional(),
+    allowed_actions: z.array(z.string().regex(ACTION_PATTERN)).optional(),
+    forbidden_actions: z.array(z.string().regex(ACTION_PATTERN)).optional(),
+    intents: z.array(IntentDeclarationSchema).max(50).default([]),
+    /** When true, a request that declares no intent is refused. */
+    intent_required: z.boolean().default(false),
     rules: z.array(RuleSchema).min(1).max(500),
   })
   .strict()
+  .transform((doc) => {
+    // Normalise the shorthand into `intents` so the stored, hashed document has
+    // exactly one shape and the evaluator has exactly one thing to read.
+    if (doc.intent === undefined && !doc.allowed_actions && !doc.forbidden_actions) {
+      return doc;
+    }
+    const shorthand = {
+      id: doc.id,
+      ...(doc.intent ? { description: doc.intent } : {}),
+      allowed_actions: doc.allowed_actions ?? [],
+      forbidden_actions: doc.forbidden_actions ?? [],
+    };
+    const {
+      intent: _intent,
+      allowed_actions: _allowed,
+      forbidden_actions: _forbidden,
+      ...rest
+    } = doc;
+    return { ...rest, intents: [shorthand, ...doc.intents] };
+  })
   .superRefine((doc, ctx) => {
     const seen = new Set<string>();
     for (const [index, rule] of doc.rules.entries()) {
@@ -316,6 +358,25 @@ export const PolicyDocumentSchema = z
           path: ['rules', index, 'then', 'approval'],
         });
       }
+    }
+
+    const intentIds = new Set<string>();
+    for (const [index, declaration] of (doc.intents ?? []).entries()) {
+      if (intentIds.has(declaration.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate intent id "${declaration.id}"`,
+          path: ['intents', index, 'id'],
+        });
+      }
+      intentIds.add(declaration.id);
+    }
+    if (doc.intent_required && (doc.intents ?? []).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'intent_required is set but the policy declares no intents',
+        path: ['intent_required'],
+      });
     }
   });
 

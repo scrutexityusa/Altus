@@ -28,9 +28,14 @@ import {
   IngestSignalSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
+  RegisterSignalKeySchema,
+  RotateSignalKeySchema,
   RevokeLeaseSchema,
   SubmitApprovalSchema,
 } from '../schemas.js';
+import { buildDecisionTrace } from '../services/trace.js';
+import { recordSecurityEvent, type SecurityEventInput } from '../services/signals.js';
+import { metrics } from '../metrics.js';
 
 export interface RouteDeps {
   db: Database;
@@ -77,6 +82,32 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       }
       return handler(client);
     });
+  }
+
+  /**
+   * Runs `fn`, and if it fails with an error carrying a security event, writes
+   * that event on its own transaction before rethrowing. The failing
+   * transaction has already rolled back by then, which is exactly why the
+   * record cannot be written inside it.
+   */
+  async function recordingRejections<T>(
+    request: { principal: Principal },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const event = (error as { internal?: { securityEvent?: SecurityEventInput } })?.internal
+        ?.securityEvent;
+      if (event) {
+        await db
+          .withTenant(request.principal.organization_id, (client) =>
+            recordSecurityEvent(client, event),
+          )
+          .catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   // ==========================================================================
@@ -196,6 +227,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ttlSeconds: body.ttl_seconds,
           issuedByUserId: request.principal.type === 'user' ? request.principal.id : null,
           revocable: body.revocable,
+          grantType: body.grant_type,
+          purpose: body.purpose ?? null,
           metadata: body.metadata,
         });
         return {
@@ -302,6 +335,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         resource: body.resource,
         context: body.context,
         presentedLeaseId: body.authority_lease_id ?? null,
+        declaredIntent: body.declared_intent ?? null,
         nonce: body.nonce ?? null,
         idempotencyKey: (request.headers['idempotency-key'] as string | undefined) ?? null,
         correlationId: body.correlation_id ?? null,
@@ -325,6 +359,14 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           risk_signal_ids: result.evaluation.risk_signal_ids,
           constraints_evaluated: result.evaluation.constraints_evaluated,
           approval_requirement: result.evaluation.approval_requirement,
+          // The structured intent verdict. Never prose; the explanation
+          // compiler renders this same data as text.
+          intent_evaluation: result.evaluation.intent_evaluation,
+          // The next legitimate step, when one exists. Computed by the policy
+          // layer from this decision -- see packages/core/src/corrective.ts.
+          corrective_actions: result.corrective_actions,
+          // Fingerprint of the conditions this decision rests on.
+          context_hash: result.evaluation.context_hash,
           failover_behavior: result.evaluation.failover_behavior,
           expires_at: result.evaluation.expires_at,
           decision_timestamp: result.evaluation.decision_timestamp,
@@ -488,10 +530,11 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/signals', async (request, reply) => {
     requireScope(request.principal, SCOPES.signalWrite);
     const body = IngestSignalSchema.parse(request.body);
-    const { status, body: payload } = await mutate(
-      request as never,
-      'POST /v1/signals',
-      async (client) => {
+    // A rejected signal rolls its transaction back, so any security event
+    // written inside it would vanish with it. Recording it out here, on a
+    // fresh transaction, is what makes a refusal auditable.
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/signals', async (client) => {
         const result = await ingestSignal(client, keys, {
           organizationId: request.principal.organization_id,
           subjectType: body.subject.type,
@@ -503,9 +546,12 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ttlSeconds: body.ttl_seconds,
           issuedAt: body.issued_at,
           metadata: body.metadata,
+          eventId: body.event_id ?? null,
+          signature: body.signature ?? null,
+          signingKeyId: body.signing_key_id ?? null,
         });
         return { status: 201, body: result };
-      },
+      }),
     );
     reply.code(status).send(payload);
   });
@@ -832,6 +878,143 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ORDER BY pv.created_at DESC LIMIT 100`,
       );
       return { policy_versions: result.rows.map(serializePolicyVersion) };
+    }),
+  );
+
+  // ==========================================================================
+  // Causal evidence
+  // ==========================================================================
+
+  /**
+   * The root-cause trace: where the authority behind this decision came from,
+   * in causal order, oldest cause first. A database traversal -- nothing is
+   * summarised or generated, so the same decision always yields the same trace.
+   */
+  app.get<{ Params: { id: string } }>('/v1/trace/:id', async (request) =>
+    db.withTenant(request.principal.organization_id, async (client) => {
+      const started = performance.now();
+      const trace = await buildDecisionTrace(client, request.params.id);
+      metrics.traceDuration.observe((performance.now() - started) / 1000);
+      metrics.traceNodes.observe(trace.trace.length);
+      return trace;
+    }),
+  );
+
+  // ==========================================================================
+  // Signal signing keys
+  // ==========================================================================
+
+  app.post('/v1/signal-keys', async (request, reply) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    const body = RegisterSignalKeySchema.parse(request.body);
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/signal-keys',
+      async (client) => {
+        try {
+          const result = await client.query(
+            `INSERT INTO scrutexity.signal_signing_keys
+               (id, organization_id, source, key_id, algorithm, key_material,
+                not_before, not_after)
+             VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, now()),$8)
+             RETURNING id, source, key_id, algorithm, status, not_before, not_after, created_at`,
+            [
+              newId('signalKey'),
+              request.principal.organization_id,
+              body.source,
+              body.key_id,
+              body.algorithm,
+              body.key_material,
+              body.not_before ?? null,
+              body.not_after ?? null,
+            ],
+          );
+          // The key material is never echoed back, for either algorithm. A
+          // caller that just supplied it does not need it returned, and an
+          // HMAC secret in a response body is a secret in a log.
+          return { status: 201, body: { signal_key: result.rows[0] } };
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError(
+              'STATE_CONFLICT',
+              `key "${body.key_id}" is already registered for source "${body.source}"`,
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    reply.code(status).send(payload);
+  });
+
+  app.get('/v1/signal-keys', async (request) =>
+    db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `SELECT id, source, key_id, algorithm, status, not_before, not_after,
+                created_at, revoked_at
+           FROM scrutexity.signal_signing_keys
+          ORDER BY created_at DESC LIMIT 200`,
+      );
+      return { signal_keys: result.rows };
+    }),
+  );
+
+  /**
+   * Retires a key with a grace period rather than revoking it outright. The
+   * overlap is what lets a source finish switching over without dropping
+   * signals; use revoke when a key is believed compromised and no overlap is
+   * acceptable.
+   */
+  app.post<{ Params: { id: string } }>('/v1/signal-keys/:id/retire', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    const body = RotateSignalKeySchema.parse(request.body ?? {});
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.signal_signing_keys
+            SET status = 'RETIRING',
+                not_after = now() + make_interval(secs => $2)
+          WHERE id = $1 AND status = 'ACTIVE'
+          RETURNING id, source, key_id, status, not_after`,
+        [request.params.id, body.grace_period_seconds],
+      );
+      if (result.rowCount === 0) {
+        throw new ScrutexityError('NOT_FOUND', 'no active signing key with that id');
+      }
+      return { signal_key: result.rows[0] };
+    });
+  });
+
+  app.post<{ Params: { id: string } }>('/v1/signal-keys/:id/revoke', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.signal_signing_keys
+            SET status = 'REVOKED', revoked_at = now()
+          WHERE id = $1 AND status <> 'REVOKED'
+          RETURNING id, source, key_id, status, revoked_at`,
+        [request.params.id],
+      );
+      if (result.rowCount === 0) {
+        throw new ScrutexityError('NOT_FOUND', 'no revocable signing key with that id');
+      }
+      await recordSecurityEvent(client, {
+        organizationId: request.principal.organization_id,
+        kind: 'SIGNAL_KEY_REVOKED',
+        source: result.rows[0]!.source as string,
+        detail: { key_id: result.rows[0]!.key_id, revoked_by: request.principal.id },
+      });
+      return { signal_key: result.rows[0] };
+    });
+  });
+
+  app.get('/v1/security-events', async (request) =>
+    db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `SELECT id, kind, source, subject_id, detail, created_at
+           FROM scrutexity.security_events
+          ORDER BY created_at DESC LIMIT 200`,
+      );
+      return { security_events: result.rows };
     }),
   );
 

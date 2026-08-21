@@ -16,7 +16,12 @@ start() {
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='scrutexity_owner') THEN
-    CREATE ROLE scrutexity_owner LOGIN PASSWORD 'scrutexity';
+    -- CREATEDB so the test suite can provision a throwaway database per run.
+    -- In CI the owner is the container's superuser and already has it; locally
+    -- it must be granted, or `vitest run` cannot isolate itself.
+    CREATE ROLE scrutexity_owner LOGIN CREATEDB PASSWORD 'scrutexity';
+  ELSE
+    ALTER ROLE scrutexity_owner CREATEDB;
   END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='scrutexity_app') THEN
     CREATE ROLE scrutexity_app LOGIN PASSWORD 'scrutexity';

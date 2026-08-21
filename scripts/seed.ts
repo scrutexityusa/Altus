@@ -255,7 +255,9 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
         key: 'verification_agent',
         type: 'agent' as const,
         principal: agents['verification']!,
-        scopes: ['read', 'authorization:evaluate'],
+        // May sub-delegate the reads it holds. Scope grants the ability to ask;
+        // containment is what stops it passing on authority it never had.
+        scopes: ['read', 'authorization:evaluate', 'delegation:create'],
       },
       {
         key: 'fraud_engine',

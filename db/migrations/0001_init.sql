@@ -14,7 +14,6 @@
 --   * Money is stored as (amount_minor BIGINT, currency CHAR(3)). Never float.
 -- =============================================================================
 
-BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS scrutexity;
 SET search_path = scrutexity, public;
@@ -484,5 +483,3 @@ CREATE TABLE idempotency_keys (
   PRIMARY KEY (organization_id, endpoint, key)
 );
 CREATE INDEX idempotency_keys_created_idx ON idempotency_keys (created_at);
-
-COMMIT;

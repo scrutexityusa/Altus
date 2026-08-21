@@ -24,6 +24,8 @@ import {
   IngestSignalSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
+  RegisterSignalKeySchema,
+  RotateSignalKeySchema,
   RevokeLeaseSchema,
   SubmitApprovalSchema,
 } from '../services/api/src/schemas.js';
@@ -296,6 +298,19 @@ const DECISION_SCHEMA = {
         forbid_self_approval: { type: 'boolean' },
         ttl_seconds: { type: 'integer' },
       },
+    },
+    intent_evaluation: {
+      oneOf: [{ $ref: '#/components/schemas/IntentEvaluation' }, { type: 'null' }],
+    },
+    corrective_actions: {
+      type: 'array',
+      items: { $ref: '#/components/schemas/CorrectiveAction' },
+      description: 'Empty for an ALLOW, and empty for a hard violation.',
+    },
+    context_hash: {
+      type: ['string', 'null'],
+      description:
+        'Fingerprint of every input this decision rests on. Recomputed at execution; if it has moved, the action is refused rather than reconciled.',
     },
     failover_behavior: { type: 'string', enum: ['FAIL_OPEN', 'FAIL_CLOSED', 'ESCALATE'] },
     expires_at: {
@@ -845,6 +860,104 @@ function buildOpenApi(): unknown {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             '200': jsonResponse('The version is now active.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/trace/{id}': {
+        get: {
+          tags: ['Evidence'],
+          summary: 'Root-cause trace: where the authority behind a decision came from',
+          description: [
+            'Walks backwards from a decision to its origin and returns the chain in causal',
+            'order, oldest cause first -- policy activation, the authority it admitted, any',
+            'delegation, the request, the signals that were read, the humans who approved,',
+            'the decision, and what was done with it. Each node carries a timestamp and the',
+            'causal edge that produced the next one. A database traversal: deterministic,',
+            'replayable, and never summarised.',
+          ].join(' '),
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Decision id.',
+            },
+          ],
+          responses: {
+            '200': jsonResponse('The causal chain.', {
+              type: 'object',
+              properties: {
+                decision_id: { type: 'string' },
+                root_cause: { $ref: '#/components/schemas/TraceNode' },
+                trace: { type: 'array', items: { $ref: '#/components/schemas/TraceNode' } },
+                complete: {
+                  type: 'boolean',
+                  description:
+                    'True when the chain reaches a policy activation rather than stopping short.',
+                },
+              },
+            }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Register a signing key for a signal source',
+          description:
+            'Ed25519 is preferred: only the public key is stored, so a database disclosure yields nothing an attacker can sign with. Key material is never echoed back.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/RegisterSignalKeyRequest' }),
+          responses: {
+            '201': jsonResponse('The key was registered.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+        get: {
+          tags: ['Signals'],
+          summary: 'List signing keys and their rotation state',
+          responses: {
+            '200': jsonResponse('Signing keys.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys/{id}/retire': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Retire a key with a grace period',
+          description:
+            'The outgoing key stays valid for the grace period so the source can switch over without dropping signals. Use revoke instead when a key is believed compromised.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/RotateSignalKeyRequest' }),
+          responses: {
+            '200': jsonResponse('The key is retiring.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys/{id}/revoke': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Revoke a key immediately, with no grace period',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': jsonResponse('The key was revoked.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/security-events': {
+        get: {
+          tags: ['Operations'],
+          summary: 'Security events: rejected signatures, replays, key revocations',
+          description:
+            'Queryable without access to application logs, because an operator investigating a rejected signal should not need a shell on a production node.',
+          responses: {
+            '200': jsonResponse('Security events.', { type: 'object' }),
             ...ERROR_RESPONSES,
           },
         },

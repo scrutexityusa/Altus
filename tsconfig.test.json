@@ -1,0 +1,24 @@
+{
+  "$comment": "Typechecks the test suite, which the build projects deliberately exclude. Without this, a test file can drift from the types it exercises and still run, because the test runner strips types rather than checking them.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "esModuleInterop": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"],
+    "paths": {
+      "@scrutexity/core": ["./packages/core/src/index.ts"],
+      "@scrutexity/sdk": ["./packages/sdk/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/**/test/**/*.ts",
+    "services/**/test/**/*.ts",
+    "spec/**/test/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

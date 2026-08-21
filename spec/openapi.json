@@ -92,7 +92,13 @@
                   "AUTHORITY_REVOKED",
                   "AUTHORITY_SUSPENDED",
                   "CONSTRAINT_VIOLATION",
+                  "AUTHORITY_CONSUMED",
                   "DELEGATION_EXCEEDS_PARENT",
+                  "INTENT_MISMATCH",
+                  "APPROVAL_CONTEXT_MISMATCH",
+                  "CONTEXT_CHANGED",
+                  "SIGNAL_SIGNATURE_INVALID",
+                  "SIGNAL_KEY_UNKNOWN",
                   "POLICY_UNAVAILABLE",
                   "SIGNAL_UNAVAILABLE",
                   "ENFORCEMENT_UNAVAILABLE",
@@ -241,6 +247,30 @@
                 "type": "integer"
               }
             }
+          },
+          "intent_evaluation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/IntentEvaluation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "corrective_actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CorrectiveAction"
+            },
+            "description": "Empty for an ALLOW, and empty for a hard violation."
+          },
+          "context_hash": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fingerprint of every input this decision rests on. Recomputed at execution; if it has moved, the action is refused rather than reconciled."
           },
           "failover_behavior": {
             "type": "string",
@@ -1243,6 +1273,11 @@
               "authority_lease_id": {
                 "type": "string"
               },
+              "declared_intent": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
               "nonce": {
                 "type": "string",
                 "minLength": 8,
@@ -1371,6 +1406,19 @@
               "revocable": {
                 "type": "boolean",
                 "default": true
+              },
+              "grant_type": {
+                "type": "string",
+                "enum": [
+                  "REUSABLE",
+                  "SINGLE_USE"
+                ],
+                "default": "REUSABLE"
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
               },
               "metadata": {
                 "type": "object",
@@ -1593,6 +1641,21 @@
               "issued_at": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "signature": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "signing_key_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
               },
               "metadata": {
                 "type": "object",
@@ -3816,6 +3879,562 @@
         "responses": {
           "200": {
             "description": "The version is now active.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trace/{id}": {
+      "get": {
+        "tags": [
+          "Evidence"
+        ],
+        "summary": "Root-cause trace: where the authority behind a decision came from",
+        "description": "Walks backwards from a decision to its origin and returns the chain in causal order, oldest cause first -- policy activation, the authority it admitted, any delegation, the request, the signals that were read, the humans who approved, the decision, and what was done with it. Each node carries a timestamp and the causal edge that produced the next one. A database traversal: deterministic, replayable, and never summarised.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Decision id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The causal chain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "decision_id": {
+                      "type": "string"
+                    },
+                    "root_cause": {
+                      "$ref": "#/components/schemas/TraceNode"
+                    },
+                    "trace": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TraceNode"
+                      }
+                    },
+                    "complete": {
+                      "type": "boolean",
+                      "description": "True when the chain reaches a policy activation rather than stopping short."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/signal-keys": {
+      "post": {
+        "tags": [
+          "Signals"
+        ],
+        "summary": "Register a signing key for a signal source",
+        "description": "Ed25519 is preferred: only the public key is stored, so a database disclosure yields nothing an attacker can sign with. Key material is never echoed back.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSignalKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The key was registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Signals"
+        ],
+        "summary": "List signing keys and their rotation state",
+        "responses": {
+          "200": {
+            "description": "Signing keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/signal-keys/{id}/retire": {
+      "post": {
+        "tags": [
+          "Signals"
+        ],
+        "summary": "Retire a key with a grace period",
+        "description": "The outgoing key stays valid for the grace period so the source can switch over without dropping signals. Use revoke instead when a key is believed compromised.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateSignalKeyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The key is retiring.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/signal-keys/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Signals"
+        ],
+        "summary": "Revoke a key immediately, with no grace period",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The key was revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication is required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not permitted to perform this operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found, or not visible to this tenant.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Replay, idempotency conflict or state conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency of the decision was unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security-events": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Security events: rejected signatures, replays, key revocations",
+        "description": "Queryable without access to application logs, because an operator investigating a rejected signal should not need a shell on a production node.",
+        "responses": {
+          "200": {
+            "description": "Security events.",
             "content": {
               "application/json": {
                 "schema": {

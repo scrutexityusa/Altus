@@ -24,6 +24,10 @@ export * from './policy/predicate.js';
 export * from './policy/engine.js';
 export * from './policy/loader.js';
 
+export * from './context.js';
+export * from './signals.js';
+export * from './intent.js';
+export * from './corrective.js';
 export * from './approval.js';
 export * from './delegation.js';
 export * from './evaluate.js';

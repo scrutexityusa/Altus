@@ -1,8 +1,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
+// ajv and ajv-formats are CommonJS. Under NodeNext their types describe the
+// module namespace, while the value the bundler hands us at runtime is the
+// callable default. `createRequire` gets both to agree without pretending the
+// namespace is constructible.
+import { createRequire } from 'node:module';
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -21,6 +24,11 @@ const openapi = JSON.parse(readFileSync(join(root, 'spec/openapi.json'), 'utf8')
 const policySchema = JSON.parse(readFileSync(join(root, 'spec/policy.schema.json'), 'utf8'));
 
 describe('policy JSON Schema', () => {
+  const require = createRequire(import.meta.url);
+  const Ajv = require('ajv') as new (options: Record<string, unknown>) => {
+    compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown };
+  };
+  const addFormats = require('ajv-formats') as (ajv: unknown) => void;
   const ajv = new Ajv({ allErrors: true, strict: false });
   addFormats(ajv);
   const validate = ajv.compile(policySchema);

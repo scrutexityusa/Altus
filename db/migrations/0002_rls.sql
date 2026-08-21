@@ -8,7 +8,6 @@
 -- A query that forgets to set it sees zero rows and can insert nothing.
 -- =============================================================================
 
-BEGIN;
 SET search_path = scrutexity, public;
 
 DO $$
@@ -91,5 +90,3 @@ LANGUAGE sql SECURITY DEFINER SET search_path = scrutexity, public STABLE AS $$
 $$;
 REVOKE ALL ON FUNCTION scrutexity.resolve_credential(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION scrutexity.resolve_credential(TEXT) TO scrutexity_app;
-
-COMMIT;

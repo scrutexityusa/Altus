@@ -22,6 +22,8 @@ export interface IssueLeaseInput {
   ttlSeconds: number;
   issuedByUserId?: string | null;
   revocable?: boolean;
+  grantType?: 'REUSABLE' | 'SINGLE_USE';
+  purpose?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -44,8 +46,8 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
     `INSERT INTO scrutexity.authority_leases
        (id, organization_id, agent_id, policy_version_id, issued_by_user_id, actions,
         resources, constraints, status, revocable, parent_lease_id, depth,
-        issued_at, expires_at, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,NULL,0,$10,$11,$12)
+        issued_at, expires_at, metadata, grant_type, purpose)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,NULL,0,$10,$11,$12,$13,$14)
      RETURNING *`,
     [
       leaseId,
@@ -60,6 +62,8 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
       now,
       addSeconds(now, input.ttlSeconds),
       JSON.stringify(input.metadata ?? {}),
+      input.grantType ?? 'REUSABLE',
+      input.purpose ?? null,
     ],
   );
 
@@ -77,10 +81,12 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
       expires_at: lease.expires_at,
       issued_by_user_id: input.issuedByUserId ?? null,
       depth: 0,
+      grant_type: input.grantType ?? 'REUSABLE',
+      purpose: input.purpose ?? null,
     },
   });
 
-  metrics.leasesIssued.inc({ depth: '0' });
+  metrics.leasesIssued.inc({ depth: '0', grant_type: input.grantType ?? 'REUSABLE' });
   return { lease, receipt_id: receipt.id };
 }
 

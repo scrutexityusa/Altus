@@ -68,8 +68,9 @@ export async function submitApproval(
     await client.query(
       `INSERT INTO scrutexity.approvals
          (id, organization_id, approval_request_id, approver_user_id, vote,
-          roles_at_decision, satisfied_role, comment, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          roles_at_decision, satisfied_role, comment, idempotency_key,
+          approved_context_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         approvalId,
         input.organizationId,
@@ -82,6 +83,9 @@ export async function submitApproval(
         satisfiedRole,
         input.comment ?? null,
         input.idempotencyKey ?? null,
+        // The conditions this human was shown. Execution refuses to proceed if
+        // they have moved since (see services/execution.ts).
+        approvalRequest.context_hash,
       ],
     );
   } catch (error) {
@@ -111,6 +115,7 @@ export async function submitApproval(
       satisfied_role: satisfiedRole,
       requirement: approvalRequest.requirement,
       comment: input.comment ?? null,
+      approved_context_hash: approvalRequest.context_hash,
     },
   });
 

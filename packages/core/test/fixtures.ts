@@ -7,6 +7,7 @@ import type { PolicyDocument } from '../src/policy/schema.js';
 import type { EvaluationSnapshot, LeaseCandidate } from '../src/evaluate.js';
 import type { SignalView } from '../src/policy/engine.js';
 import { parseMoney } from '../src/money.js';
+import { hashObject } from '../src/canonical.js';
 
 export const T0 = new Date('2026-03-01T12:00:00.000Z');
 
@@ -38,6 +39,12 @@ export function lease(overrides: Partial<AuthorityLease> = {}): AuthorityLease {
     policy_version_id: 'polv_treasury_140',
     grant: grant(),
     status: 'ACTIVE',
+    grant_type: 'REUSABLE',
+    purpose: null,
+    claimed_at: null,
+    claimed_by_decision_id: null,
+    consumed: false,
+    used_at: null,
     revocable: true,
     parent_lease_id: null,
     depth: 0,
@@ -78,6 +85,7 @@ export interface SnapshotOptions {
   agentId?: string;
   agentHandle?: string;
   ownerUserId?: string | null;
+  declaredIntent?: string | null;
   candidates?: LeaseCandidate[];
   signals?: SignalView[];
   priorApproval?: EvaluationSnapshot['prior_approval'];
@@ -103,6 +111,12 @@ export function snapshot(options: SnapshotOptions = {}): EvaluationSnapshot {
       id: 'areq_test',
       organization_id: 'org_acme',
       agent_id: options.agentId ?? 'agent_treasury',
+      request_hash: hashObject({
+        agent: options.agentId ?? 'agent_treasury',
+        action: options.action ?? 'wire.execute',
+        context,
+      }),
+      declared_intent: options.declaredIntent ?? null,
       action: options.action ?? 'wire.execute',
       resource: {
         type: options.resourceType ?? 'bank_account',
