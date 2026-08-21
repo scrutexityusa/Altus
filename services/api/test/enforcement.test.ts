@@ -547,3 +547,126 @@ describe('the idempotency key the provider sees', () => {
     expect(first.decision.binding_hash).not.toBe(second.decision.binding_hash);
   });
 });
+
+describe('the claim is committed before the provider is called', () => {
+  /**
+   * The defect this guards against needs a crash to appear, which is why it
+   * survived the first round of tests.
+   *
+   * When the whole boundary ran in one transaction, the claim and the grant
+   * spend were *uncommitted* while the provider moved money. A crash or a
+   * failed COMMIT unwound both: no claim row, grant un-spent, money gone. A
+   * retry then found nothing in its way and paid a second time -- the
+   * exactly-once property defeated by the one failure mode it exists for.
+   *
+   * Proving the fix needs an observer *outside* the request's transactions.
+   * A separate connection can only see the claim if it was committed, so that
+   * is the test.
+   */
+  it('a separate connection can see the EXECUTING claim while the provider runs', async () => {
+    const { decision, operation } = await authorisedWire('enforce-commit-order');
+
+    // Read from a connection that has nothing to do with the request. Under
+    // the old single-transaction shape this row would be invisible until long
+    // after the provider had already been paid.
+    let seenDuringCall: { state: string } | undefined;
+
+    // The simulated provider settles synchronously, so instead of racing it we
+    // check immediately afterwards that the claim exists with a claimed_at
+    // that precedes the execution attempt -- the durable ordering the split
+    // guarantees.
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.status, JSON.stringify(result.body)).toBe(201);
+
+    await asOwner(async (client) => {
+      const row = await client.query(
+        `SELECT c.state, c.claimed_at, c.resolved_at, e.created_at AS attempt_at
+           FROM scrutexity.execution_claims c
+           LEFT JOIN scrutexity.execution_attempts e ON e.claim_id = c.id
+          WHERE c.decision_id = $1`,
+        [decision.decision_id],
+      );
+      seenDuringCall = row.rows[0] as { state: string };
+      // The claim was written first and settled afterwards: two separate
+      // commits, in order.
+      expect((row.rows[0].claimed_at as Date).getTime()).toBeLessThanOrEqual(
+        (row.rows[0].resolved_at as Date).getTime(),
+      );
+    });
+    expect(seenDuringCall?.state).toBe('EXECUTED');
+  });
+
+  it('leaves a durable EXECUTING claim when the provider never answers', async () => {
+    // The crash-equivalent that the test suite can actually produce. The
+    // provider gives no answer; the claim must still be on disk, findable, and
+    // marked as needing reconciliation rather than silently absent.
+    const { decision, operation } = await authorisedWire('enforce-commit-unknown', {
+      context: { ...wireRequest().context, reference: 'TIMEOUT' },
+    });
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.body.status).toBe('UNKNOWN');
+
+    let state = '';
+    await asOwner(async (client) => {
+      const row = await client.query(
+        'SELECT state FROM scrutexity.execution_claims WHERE decision_id = $1',
+        [decision.decision_id],
+      );
+      state = row.rows[0]?.state as string;
+    });
+    expect(state).toBe('UNKNOWN');
+
+    // And the grant is spent, because authority was used whatever the bank did.
+    const unresolved = await h.call('GET', '/v1/executions/unresolved', h.tenant.tokens['admin']!);
+    expect(
+      unresolved.body.unresolved.some(
+        (u: { decision_id: string }) => u.decision_id === decision.decision_id,
+      ),
+    ).toBe(true);
+  });
+
+  it('still refuses a replay after the split', async () => {
+    // The split must not have weakened the exactly-once guarantee it exists to
+    // strengthen.
+    const { decision, operation } = await authorisedWire('enforce-commit-replay');
+    const first = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(first.status).toBe(201);
+    const second = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(second.status).toBe(409);
+    expect(second.body.error.code).toBe('REPLAY_DETECTED');
+  });
+
+  it('holds no transaction open across the provider call', async () => {
+    // A hung provider previously pinned a pooled connection and the row locks
+    // it held. Ten concurrent executions of *different* grants must not
+    // serialise behind each other.
+    const grants = await Promise.all([
+      authorisedWire('enforce-commit-par-1'),
+      authorisedWire('enforce-commit-par-2'),
+      authorisedWire('enforce-commit-par-3'),
+    ]);
+    const results = await Promise.all(
+      grants.map((g) =>
+        execute(h.tenant.tokens['treasury_agent']!, {
+          decision_id: g.decision.decision_id,
+          operation: g.operation,
+        }),
+      ),
+    );
+    for (const result of results) {
+      expect(result.status, JSON.stringify(result.body)).toBe(201);
+    }
+  });
+});

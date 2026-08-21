@@ -82,10 +82,56 @@ on `execution_claims`. The database decides who proceeds, and there is no
 interval in which two contenders both believe they may. Proven by ten
 simultaneous executions against one grant: one 201, nine `REPLAY_DETECTED`.
 
-The grant is spent at step 11, before the call rather than after. If the
-process dies mid-flight the grant is gone and the claim reads `EXECUTING` —
-the honest record of "authority was used, outcome unknown". Spending afterwards
-would leave a live grant behind a wire that may already have gone.
+The grant is spent at step 11, before the call rather than after. Spending
+afterwards would leave a live grant behind a wire that may already have gone.
+
+### Amendment (2026-08-21): two transactions, not one
+
+The paragraph above originally claimed that a process dying mid-flight leaves
+the grant spent and the claim reading `EXECUTING`. **That was false as first
+implemented.** The whole boundary ran in a single transaction with the provider
+call inside it:
+
+```
+BEGIN
+  INSERT claim (EXECUTING)     <- uncommitted
+  UPDATE lease consumed        <- uncommitted
+  call the bank                <- money moves
+  ...crash, or COMMIT fails
+ROLLBACK
+```
+
+Everything unwound. The claim never existed, the grant was un-spent, and the
+money was gone. A retry then found no claim row, the guarded `INSERT`
+succeeded, and it paid a second time — the exactly-once property defeated by
+the one failure mode it was built to survive. The tests did not catch it
+because the failure needs a crash to appear.
+
+The boundary now commits before it acts:
+
+```
+T1  checks, claim, spend grant          COMMIT
+    call the provider                   (no transaction held)
+T2  settle claim, attempt, receipt      COMMIT
+```
+
+A crash between them leaves a **committed** `EXECUTING` claim — exactly what
+`GET /v1/executions/unresolved` surfaces and what reconciliation resolves. The
+window moves from "silent double payment" to "an operator has a row telling
+them to go and look", which is the difference between a defect and a documented
+state.
+
+Holding no transaction across the call also means a slow provider no longer
+pins a pooled connection or the row locks it held, and the call is now bounded
+at 30 seconds — resolving to `UNKNOWN`, never `FAILED`, because a deadline
+passing says nothing about whether the money moved.
+
+`/v1/execute` is consequently not wrapped in the idempotency-key helper: the
+boundary owns its transactions, and an outer transaction would put the external
+call back inside one it does not control. Nothing is lost, because the grant
+_is_ the idempotency key on this route — `UNIQUE (decision_id)` is a stronger
+control than a caller-supplied header, and it is the same value the provider is
+called under.
 
 ### UNKNOWN is a first-class outcome
 

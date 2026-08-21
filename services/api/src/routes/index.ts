@@ -643,22 +643,30 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/execute', async (request, reply) => {
     requireScope(request.principal, SCOPES.authorize);
     const body = ExecuteSchema.parse(request.body);
-    const { status, body: payload } = await recordingRejections(request, () =>
-      mutate(request as never, 'POST /v1/execute', async (client) => {
-        const agentId =
-          request.principal.type === 'agent'
-            ? request.principal.id
-            : await decisionAgentId(client, body.decision_id);
-        const result = await enforceExecution(client, keys, providers, {
-          organizationId: request.principal.organization_id,
-          decisionId: body.decision_id,
-          agentId,
-          presentedOperation: body.operation,
-        });
-        return { status: 201, body: result };
-      }),
-    );
-    reply.code(status).send(payload);
+    // Deliberately not wrapped in `mutate`. The boundary owns its own
+    // transactions -- it has to, because the provider call must happen between
+    // two commits rather than inside one -- and an outer transaction would put
+    // the external call back inside a transaction it does not control.
+    //
+    // Nothing is lost by dropping the Idempotency-Key path here: the grant
+    // *is* the idempotency key on this route. `UNIQUE (decision_id)` on
+    // execution_claims is a stronger control than a caller-supplied header,
+    // and it is the same value the provider is called under.
+    const payload = await recordingRejections(request, async () => {
+      const agentId =
+        request.principal.type === 'agent'
+          ? request.principal.id
+          : await db.withTenant(request.principal.organization_id, (client) =>
+              decisionAgentId(client, body.decision_id),
+            );
+      return enforceExecution(db, keys, providers, {
+        organizationId: request.principal.organization_id,
+        decisionId: body.decision_id,
+        agentId,
+        presentedOperation: body.operation,
+      });
+    });
+    reply.code(201).send(payload);
   });
 
   /**

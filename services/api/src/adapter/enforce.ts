@@ -12,7 +12,7 @@ import {
   type ErrorCode,
   type ExecutionGrantBinding,
 } from '@scrutexity/core';
-import type { PoolClient } from '../db/pool.js';
+import type { Database, PoolClient } from '../db/pool.js';
 import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
@@ -60,7 +60,50 @@ import type { ExecutionProvider, ProviderOutcome, ProviderRegistry } from './pro
  *
  * window does not exist. There is no moment at which two requests have both
  * passed the check.
+ *
+ * ## Two transactions, and why it cannot be one
+ *
+ * This ran as a single transaction with the provider call inside it, and that
+ * was wrong in a way the tests did not catch, because the failure needs a
+ * crash to appear:
+ *
+ *     BEGIN
+ *       INSERT claim (EXECUTING)     <- uncommitted
+ *       UPDATE lease consumed        <- uncommitted
+ *       call the bank                <- money moves
+ *       ...crash, or COMMIT fails
+ *     ROLLBACK
+ *
+ * Everything unwinds. The claim never existed, the grant is un-spent, and the
+ * money is gone. A retry then finds no claim row, the guarded INSERT succeeds,
+ * and it pays a second time -- the exactly-once property defeated by the one
+ * failure mode it was built to survive.
+ *
+ * So the boundary commits before it acts:
+ *
+ *     T1  checks, claim, spend grant            COMMIT
+ *         call the provider                     (no transaction held)
+ *     T2  settle claim, attempt, receipt        COMMIT
+ *
+ * A crash between them leaves a **committed** EXECUTING claim, which is
+ * exactly what `GET /v1/executions/unresolved` surfaces and what
+ * reconciliation exists to resolve. The window moves from "silent double
+ * payment" to "an operator has a row telling them to go and look", which is
+ * the difference between a defect and a documented state.
+ *
+ * Holding no transaction across the call also means a slow provider no longer
+ * holds row locks or a pooled connection while it thinks.
  */
+
+/**
+ * How long the boundary waits for a provider before recording UNKNOWN.
+ *
+ * Deliberately generous: a payment provider taking thirty seconds is slow, not
+ * broken, and giving up early converts a successful payment into an UNKNOWN
+ * that a human then has to reconcile. The bound exists so a hung connection
+ * cannot pin a request forever, not to enforce a latency budget.
+ */
+const PROVIDER_TIMEOUT_MS = 30_000;
 
 export interface EnforceExecutionInput {
   organizationId: string;
@@ -115,11 +158,59 @@ interface DecisionRow {
  * property to preserve above all others when editing this function.
  */
 export async function enforceExecution(
-  client: PoolClient,
+  db: Database,
   keys: EvidenceKeys,
   providers: ProviderRegistry,
   input: EnforceExecutionInput,
 ): Promise<EnforceExecutionResult> {
+  // -- Phase 1: everything that must be true before anything irreversible ---
+  //
+  // Committed before the provider is called. That is the whole point of the
+  // split: see the note on the two transactions above.
+  const prepared = await db.withTenant(input.organizationId, (client) =>
+    prepare(client, providers, input),
+  );
+
+  // -- Phase 2: the external call, holding no transaction -------------------
+  const outcome = await callProvider(prepared.provider, {
+    operation: prepared.operation,
+    idempotencyKey: idempotencyKeyFor(prepared.decision.id),
+    decisionId: prepared.decision.id,
+    organizationId: input.organizationId,
+  });
+
+  // -- Phase 3: record what happened ---------------------------------------
+  return db.withTenant(input.organizationId, (client) =>
+    settle(client, keys, {
+      claimId: prepared.claimId,
+      decision: prepared.decision,
+      agentId: input.agentId,
+      organizationId: input.organizationId,
+      provider: prepared.provider,
+      operation: prepared.operation,
+      executedIntentHash: prepared.executedIntentHash,
+      outcome,
+    }),
+  );
+}
+
+interface PreparedExecution {
+  claimId: string;
+  decision: DecisionRow;
+  provider: ExecutionProvider;
+  operation: CanonicalOperation;
+  executedIntentHash: string;
+}
+
+/**
+ * Every check, the atomic claim, and the grant spend -- in one transaction
+ * that commits before the provider is reached.
+ */
+async function prepare(
+  client: PoolClient,
+  providers: ProviderRegistry,
+  input: EnforceExecutionInput,
+): Promise<PreparedExecution> {
   // Authoritative for every expiry judged in this boundary: the grant, the
   // acting lease and every ancestor. An API node with a fast clock must not be
   // able to refuse a live grant, nor a slow one honour a lapsed lease.
@@ -344,10 +435,13 @@ export async function enforceExecution(
 
   // -- 10. Spend the grant --------------------------------------------------
   //
-  // Before the external call, not after. If the process dies mid-flight the
-  // grant is gone and the claim reads EXECUTING, which is the honest record of
-  // "authority was used, outcome unknown". Spending afterwards would leave a
-  // live grant behind a wire that may already have gone.
+  // In the same transaction as the claim, and committed together with it
+  // before the provider is called. If the process dies mid-flight the grant is
+  // gone and the claim reads EXECUTING -- the honest record of "authority was
+  // used, outcome unknown", durable because it was committed.
+  //
+  // Spending afterwards would leave a live grant behind a wire that may
+  // already have gone.
   if (decision.authority_lease_id) {
     const consumed = await client.query(
       `UPDATE scrutexity.authority_leases
@@ -362,25 +456,7 @@ export async function enforceExecution(
     if ((consumed.rowCount ?? 0) > 0) metrics.singleUseGrantsConsumed.inc({});
   }
 
-  // -- 11. Execute ----------------------------------------------------------
-  const outcome = await callProvider(provider, {
-    operation: presented,
-    idempotencyKey: idempotencyKeyFor(decision.id),
-    decisionId: decision.id,
-    organizationId: input.organizationId,
-  });
-
-  // -- 12. Settle the claim and write the evidence --------------------------
-  return settle(client, keys, {
-    claimId,
-    decision,
-    agentId: input.agentId,
-    organizationId: input.organizationId,
-    provider,
-    operation: presented,
-    executedIntentHash,
-    outcome,
-  });
+  return { claimId, decision, provider, operation: presented, executedIntentHash };
 }
 
 // ---------------------------------------------------------------------------
@@ -569,9 +645,26 @@ export function idempotencyKeyFor(decisionId: string): string {
 async function callProvider(
   provider: ExecutionProvider,
   request: Parameters<ExecutionProvider['execute']>[0],
+  timeoutMs = PROVIDER_TIMEOUT_MS,
 ): Promise<ProviderOutcome> {
   try {
-    return await provider.execute(request);
+    // Bounded. A provider that never answers must not hold the request open
+    // forever -- and the timeout resolves to UNKNOWN, not FAILED, because a
+    // deadline passing says nothing about whether the money moved.
+    return await Promise.race([
+      provider.execute(request),
+      new Promise<ProviderOutcome>((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              status: 'UNKNOWN',
+              error: `the provider did not answer within ${timeoutMs}ms`,
+              detail: { timed_out: true },
+            }),
+          timeoutMs,
+        ).unref(),
+      ),
+    ]);
   } catch (error) {
     return {
       status: 'UNKNOWN',
