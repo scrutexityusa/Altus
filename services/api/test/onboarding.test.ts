@@ -197,6 +197,139 @@ describe('credentials', () => {
   });
 });
 
+describe('policy activation through the API', () => {
+  // `POST /v1/policy-versions/{id}/reviews` was published in the OpenAPI
+  // contract, required for any partner to activate their first policy, and had
+  // never been executed by anything: the seed writes reviews with direct SQL.
+  // It was broken -- a parameter used as both an enum and a text literal in one
+  // statement, failing with 42P08. Nothing could have caught that except
+  // walking the flow, so the flow is now walked on every CI run.
+  let versionId: string;
+  let reviewerOne: string;
+  let reviewerTwo: string;
+
+  beforeAll(async () => {
+    reviewerOne = await createUserWithCredential(
+      'flow.reviewer.one@example.com',
+      'Flow Reviewer One',
+      ['policy_reviewer'],
+      ['read', 'policies:write'],
+    );
+    reviewerTwo = await createUserWithCredential(
+      'flow.reviewer.two@example.com',
+      'Flow Reviewer Two',
+      ['policy_reviewer'],
+      ['read', 'policies:write'],
+    );
+    const created = await call('POST', '/v1/policy-versions', admin, { document: readPolicy() });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    versionId = created.body.policy_version.id;
+    expect(created.body.policy_version.status).toBe('DRAFT');
+  }, 120_000);
+
+  it('refuses to let the author review their own version', async () => {
+    // Dual control, and the reason the smallest tenant that can activate a
+    // policy has three humans in it. Not friction to route around -- it is the
+    // governance model.
+    const response = await call('POST', `/v1/policy-versions/${versionId}/reviews`, admin, {
+      vote: 'APPROVED',
+      comment: 'Approving my own work.',
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it('moves to REVIEW after one non-author approval, not to APPROVED', async () => {
+    const response = await call('POST', `/v1/policy-versions/${versionId}/reviews`, reviewerOne, {
+      vote: 'APPROVED',
+      comment: 'First review.',
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body.status).toBe('REVIEW');
+    expect(response.body.approvals).toBe(1);
+  });
+
+  it('refuses the same reviewer voting twice', async () => {
+    const response = await call('POST', `/v1/policy-versions/${versionId}/reviews`, reviewerOne, {
+      vote: 'APPROVED',
+    });
+    expect(response.status).toBe(409);
+  });
+
+  it('reaches APPROVED only on a second, distinct non-author approval', async () => {
+    const response = await call('POST', `/v1/policy-versions/${versionId}/reviews`, reviewerTwo, {
+      vote: 'APPROVED',
+      comment: 'Second review.',
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body.status).toBe('APPROVED');
+    expect(response.body.approvals).toBe(2);
+  });
+
+  it('activates', async () => {
+    const response = await call('POST', `/v1/policy-versions/${versionId}/activate`, admin, {});
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+  });
+
+  it('decides against the activated version, by hash', async () => {
+    // The point of the whole lifecycle: a decision records the exact policy
+    // version and content hash it was made under, so it can be replayed against
+    // the bytes that produced it.
+    const activated = await call('GET', `/v1/policy-versions`, admin);
+    const active = activated.body.policy_versions.find(
+      (v: { status: string }) => v.status === 'ACTIVE',
+    );
+    expect(active.id).toBe(versionId);
+
+    const agent = await call('POST', '/v1/agents', admin, {
+      handle: 'flow-probe-agent',
+      display_name: 'Flow Probe',
+    });
+    expect(agent.status).toBe(201);
+    const probe = await createAgentCredential('flow-probe-agent');
+
+    const decision = await call('POST', '/v1/authorization/evaluate', probe, {
+      agent_id: 'flow-probe-agent',
+      action: 'wire.execute',
+      resource: { type: 'bank_account', id: 'acct_001' },
+      context: {
+        amount: '100.00',
+        currency: 'USD',
+        counterparty_id: 'cp_100',
+        destination_country: 'US',
+      },
+      nonce: 'flow-probe-1',
+    });
+    expect(decision.status).toBe(200);
+    // No lease, so DENY -- but decided *under the activated policy*, which is
+    // what this asserts. POLICY_UNAVAILABLE here would mean activation failed.
+    expect(decision.body.reason_code).not.toBe('POLICY_UNAVAILABLE');
+    expect(decision.body.policy_version_id ?? decision.body.policy_id).toBeTruthy();
+    expect(decision.body.policy_hash).toBe(active.content_hash);
+  });
+});
+
+describe('the tenant a request writes to is never the caller’s to choose', () => {
+  it('has no field for it in any request schema', async () => {
+    // `scrutexity.org_id` is set in exactly one place -- `db.withTenant` in
+    // pool.ts -- from `request.principal.organization_id`, which comes from the
+    // authenticated credential. The SECURITY DEFINER credential functions each
+    // re-assert equality against `current_org_id()`, so none of them can become
+    // a cross-tenant write primitive even though they bypass the tenant policy.
+    //
+    // The property this pins is the one that would break first: an endpoint
+    // that accepts an organization id from a caller.
+    const response = await call('POST', '/v1/users', admin, {
+      email: 'smuggler@example.com',
+      display_name: 'Smuggler',
+      roles: [],
+      organization_id: 'org_someone_else',
+    });
+    // Every request schema is `.strict()`, so an unknown field is a 400 rather
+    // than a silently ignored one.
+    expect(response.status).toBe(400);
+  });
+});
+
 describe('resources, and the counterparty that could not be registered', () => {
   let agentToken: string;
 
@@ -232,29 +365,15 @@ describe('resources, and the counterparty that could not be registered', () => {
       attributes: { currency: 'USD', region: 'US' },
     });
 
-    const policy = await call('POST', '/v1/policy-versions', admin, {
-      document: readPolicy(),
-    });
-    expect(policy.status, JSON.stringify(policy.body)).toBe(201);
-    const versionId = policy.body.policy_version.id;
-
-    // TWO approvals, from TWO humans who are not the author. The bootstrap
-    // admin authored this version, so it cannot review it -- which means the
-    // smallest tenant that can activate a policy has three humans in it, not
-    // one. That is correct dual control and it is also an onboarding fact a
-    // partner has to know before they start; it is documented in the
-    // onboarding guide because discovering it here would waste their afternoon.
-    for (const [index, email] of ['review.one@example.com', 'review.two@example.com'].entries()) {
-      const reviewer = await createReviewer(email, `Reviewer ${index + 1}`);
-      const review = await call('POST', `/v1/policy-versions/${versionId}/reviews`, reviewer, {
-        vote: 'APPROVED',
-        comment: 'Matches our approval matrix.',
-      });
-      expect(review.status, JSON.stringify(review.body)).toBe(201);
-    }
-
-    const activated = await call('POST', `/v1/policy-versions/${versionId}/activate`, admin, {});
-    expect(activated.status, JSON.stringify(activated.body)).toBe(200);
+    // The policy is already ACTIVE: the previous block took it through the
+    // real lifecycle -- author, two distinct non-author reviews, activation.
+    // Asserting that here rather than creating a second version keeps this
+    // block on the same sequence a partner actually follows.
+    const versions = await call('GET', '/v1/policy-versions', admin);
+    expect(
+      versions.body.policy_versions.some((v: { status: string }) => v.status === 'ACTIVE'),
+      'the policy activation block must run first',
+    ).toBe(true);
 
     // The bootstrap admin holds `leases:write` and still cannot issue this
     // lease: issuance ceilings are keyed on the *user's role*, and the starter
@@ -285,7 +404,9 @@ describe('resources, and the counterparty that could not be registered', () => {
       },
       ttl_seconds: 3600,
     });
-    expect(refused.status, 'the admin role is not in the policy ceilings').not.toBe(201);
+    expect(refused.status, 'the admin role is not in the policy ceilings').toBe(422);
+    expect(refused.body.error.code).toBe('DELEGATION_EXCEEDS_PARENT');
+    expect(refused.body.error.message).toContain('issuance ceiling');
 
     const lease = await call('POST', '/v1/authority-leases', provisioner, {
       agent_id: 'our-treasury-agent',
@@ -403,6 +524,17 @@ async function createUserWithCredential(
     principal_type: 'user',
     principal_id: user.body.user.id,
     scopes,
+  });
+  expect(credential.status, JSON.stringify(credential.body)).toBe(201);
+  return credential.body.token;
+}
+
+/** An agent's own credential, by handle -- the two-call pattern again. */
+async function createAgentCredential(handle: string): Promise<string> {
+  const credential = await call('POST', '/v1/credentials', admin, {
+    principal_type: 'agent',
+    principal_id: handle,
+    scopes: ['read', 'authorization:evaluate'],
   });
   expect(credential.status, JSON.stringify(credential.body)).toBe(201);
   return credential.body.token;

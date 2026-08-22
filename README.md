@@ -164,25 +164,29 @@ import { ScrutexityClient } from '@scrutexity/sdk';
 
 const scrutexity = new ScrutexityClient({ baseUrl, token });
 
-const { decision, result } = await scrutexity.guard(
-  {
-    agentId: 'treasury-agent',
-    action: 'wire.execute',
-    resource: 'bank_account:acct_991',
-    context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
-  },
-  async () => executeWire(),
-);
+const { decision, execution } = await scrutexity.guard({
+  agentId: 'treasury-agent',
+  action: 'wire.execute',
+  resource: 'bank_account:acct_991',
+  context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
+});
 
 if (decision.requiresApproval) {
   notifyTreasurer(decision.approvalRequestId);
 }
 ```
 
-`guard` keeps the check and the act together and records the execution against
-the grant either way, so evidence is a consequence of using the SDK rather than
-a step someone has to remember. Only `ALLOW` is truthy — an escalation cannot
-be mistaken for a soft yes.
+`guard` takes no callback, deliberately. Scrutexity performs the operation
+through the enforcement boundary, so there is no moment when the caller holds an
+approved decision and an unexecuted side effect — nothing to drift apart, and
+the operation that reaches the provider is the one that was authorised or
+nothing reaches it at all. Only `ALLOW` is truthy; an escalation cannot be
+mistaken for a soft yes.
+
+If a side effect genuinely cannot be routed through a provider,
+`recordExternalExecution()` writes a self-reported record instead. It is a
+different verb because it means a different thing: Scrutexity verified nothing
+about that operation, and the evidence says so.
 
 ## Testing
 

@@ -42,7 +42,9 @@ export interface Harness {
 export async function startHarness(options: { reset?: boolean } = {}): Promise<Harness> {
   if (options.reset !== false) resetDatabase();
   const tenant = await seed(ADMIN_URL);
-  const other = await seed(ADMIN_URL);
+  // A second tenant, to prove isolation between them. Not a second
+  // installation: the ceremony happens once and this is provisioned onto it.
+  const other = await seed(ADMIN_URL, { additionalTenant: true });
 
   const app = await buildApp({
     NODE_ENV: 'test',

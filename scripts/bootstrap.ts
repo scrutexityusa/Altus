@@ -192,11 +192,50 @@ export interface BootstrapResult {
  * produces the readable error.
  */
 export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult> {
+  return runCeremony(input, { markInstallation: true });
+}
+
+/**
+ * Creates an additional tenant on an installation that is already bootstrapped.
+ *
+ * Named for exactly what it is, exported and deliberately **not reachable from
+ * the CLI**. `altus bootstrap` stays a one-time installation ceremony; if this
+ * were a flag on it, it would be a tenant-provisioning API that happens to be a
+ * CLI and happens to bypass every authorization check.
+ *
+ * It exists because a multi-tenant installation is a real thing and the test
+ * suite is its first consumer: proving tenant isolation requires two tenants,
+ * and before the seed became an API client it got them by inserting rows
+ * directly. The precondition is the inverse of bootstrap's -- this refuses
+ * unless the installation has already had its ceremony -- so neither can stand
+ * in for the other.
+ */
+export async function provisionAdditionalTenant(input: BootstrapInput): Promise<BootstrapResult> {
+  return runCeremony(input, { markInstallation: false });
+}
+
+async function runCeremony(
+  input: BootstrapInput,
+  options: { markInstallation: boolean },
+): Promise<BootstrapResult> {
   const client = new pg.Client({ connectionString: input.connectionString });
   await client.connect();
 
   try {
     await preflight(client);
+
+    if (!options.markInstallation) {
+      const marker = await client.query('SELECT 1 FROM scrutexity.installation');
+      if (marker.rowCount === 0) {
+        throw new BootstrapError(
+          'NOT_BOOTSTRAPPED',
+          'this installation has not had its bootstrap ceremony',
+          'Run `altus bootstrap` first. An additional tenant is provisioned onto an\n' +
+            'existing installation; it does not stand in for the ceremony.',
+        );
+      }
+    }
+
     await client.query('BEGIN');
 
     const orgId = newId('organization');
@@ -242,11 +281,13 @@ export async function bootstrap(input: BootstrapInput): Promise<BootstrapResult>
     // an already-bootstrapped installation and the run failed later on a slug
     // collision -- or would have succeeded outright for a differently-named
     // organization. A security check that RLS can filter is not a check.
-    await client.query(
-      `INSERT INTO scrutexity.installation (organization_id, admin_user_id, metadata)
-       VALUES ($1, $2, $3)`,
-      [orgId, userId, JSON.stringify({ org_slug: input.orgSlug })],
-    );
+    if (options.markInstallation) {
+      await client.query(
+        `INSERT INTO scrutexity.installation (organization_id, admin_user_id, metadata)
+         VALUES ($1, $2, $3)`,
+        [orgId, userId, JSON.stringify({ org_slug: input.orgSlug })],
+      );
+    }
 
     await client.query('COMMIT');
 

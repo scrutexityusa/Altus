@@ -1,43 +1,103 @@
 # API quickstart
 
 **Goal: you can try this yourself in an afternoon.** Every command below is
-copy-pasteable. The reference tenant is seeded by `make dev` and its credentials
-are written to `.seed.local.json` (git-ignored, development only).
+copy-pasteable and was run against a live server before being written down. The
+tenant is yours: created by `altus bootstrap` and the calls below, with no
+fixture credentials and no source edits.
 
 ## Setup
 
 ```bash
 git clone <repo> && cd Altus
-make dev                                  # Postgres, migrations, seeded tenant
-make api                                  # http://127.0.0.1:8080
+pnpm install
+docker compose up -d          # PostgreSQL 16
+pnpm altus migrate
+
+ALTUS_BOOTSTRAP_DATABASE_URL=postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity \
+  pnpm altus bootstrap --org-name "Example Treasury" \
+                       --admin-name "Jane Smith" \
+                       --admin-email "jane@example.com"
+
+pnpm exec tsx services/api/src/server.ts   # http://127.0.0.1:8080
 ```
 
 ```bash
 export ALTUS=http://127.0.0.1:8080
-export ADMIN=$(jq -r '.tokens.admin'           .seed.local.json)
-export AGENT=$(jq -r '.tokens.treasury_agent'  .seed.local.json)
-export TREASURER=$(jq -r '.tokens.treasurer'   .seed.local.json)
-export FRAUD=$(jq -r '.tokens.fraud_engine'    .seed.local.json)
+export ADMIN=scr_...          # printed once by bootstrap; not recoverable
 ```
+
+**Everything below is your tenant.** If you would rather read the whole
+onboarding path — including the three humans a policy needs and the four things
+that look like bugs and are not — start with
+[`onboarding.md`](onboarding.md).
+
+`make dev` still exists and seeds a demonstration tenant (Acme Corporation
+Treasury) for `make demo`. It now builds that tenant by calling the same public
+API you are about to use, so it is a consumer of this surface rather than a
+shortcut around it.
 
 **Authentication** is `Authorization: Bearer scr_<prefix>.<secret>`. Tokens are
 stored as SHA-256 hashes; the plaintext exists only where it was issued. Every
 credential carries scopes, and every route checks one:
 
-| Scope                    | Grants                                                                                              |
-| ------------------------ | --------------------------------------------------------------------------------------------------- |
-| `read`                   | Own decisions, leases, traces, receipts. Held by agents.                                            |
-| `authorization:evaluate` | Ask for a decision; execute against a grant.                                                        |
-| `delegation:create`      | Sub-delegate authority already held.                                                                |
-| `leases:write`           | Issue a lease — bounded by the policy's issuance ceilings.                                          |
-| `approvals:write`        | Cast an approval vote. Humans only.                                                                 |
-| `signals:write`          | Ingest risk signals.                                                                                |
-| `policies:write`         | Author policy versions. Humans only.                                                                |
-| `admin:write`            | Register agents and signal keys.                                                                    |
-| `audit:read`             | Policy documents, security events, key metadata, unresolved executions. **Never held by an agent.** |
+| Scope                    | Grants                                                                                                   |
+| ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `read`                   | Own decisions, leases, traces, receipts. Held by agents.                                                 |
+| `authorization:evaluate` | Ask for a decision; execute against a grant.                                                             |
+| `delegation:create`      | Sub-delegate authority already held.                                                                     |
+| `leases:write`           | Call the lease endpoint — **bounded by the policy's issuance ceilings, which key on the user's _role_.** |
+| `approvals:write`        | Cast an approval vote. Humans only.                                                                      |
+| `signals:write`          | Ingest risk signals.                                                                                     |
+| `policies:write`         | Author and review policy versions. Humans only.                                                          |
+| `admin:write`            | Register agents, users, credentials, resources and signal keys. Humans only.                             |
+| `audit:read`             | Policy documents, security events, key metadata, unresolved executions. **Never held by an agent.**      |
 
 `read` and `audit:read` are separate deliberately. An agent that could fetch the
 policy governing it would defeat the careful non-disclosure in every refusal.
+
+**The scope is not the authority.** `leases:write` opens the endpoint; the
+policy's `issuance.ceilings` decide what may come out of it, and they match on
+the _user's role_. A role the policy does not name may issue nothing.
+
+---
+
+## 0. Create the humans, their credentials, and your resources
+
+The bootstrap credential provisions and deliberately cannot act. Use it to
+create everyone else.
+
+```bash
+# A user. `roles` is your own vocabulary; the policy's approval requirements
+# and issuance ceilings match on these strings.
+curl -sS -X POST $ALTUS/v1/users \
+  -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"email":"marco@example.com","display_name":"Marco Bellini",
+       "roles":["treasurer"]}' | jq -c .user
+
+# A credential for them. The secret is returned exactly once.
+curl -sS -X POST $ALTUS/v1/credentials \
+  -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"principal_type":"user","principal_id":"user_...",
+       "scopes":["read","approvals:write"]}' | jq
+
+# Operational metadata only -- never a token or a hash.
+curl -sS $ALTUS/v1/credentials -H "authorization: Bearer $ADMIN" | jq -c '.credentials[]'
+
+# Revocation is immediate: the next request with that token is a 401.
+curl -sS -X POST $ALTUS/v1/credentials/cred_.../revoke \
+  -H "authorization: Bearer $ADMIN" | jq -c '.credential | {status,revoked_at}'
+
+# Accounts and counterparties. `counterparty_known` is derived from the
+# EXISTENCE of these rows, never from anything a caller asserts -- so an
+# unregistered counterparty is DENY / UNKNOWN_COUNTERPARTY on every wire.
+curl -sS -X POST $ALTUS/v1/resources \
+  -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"resource_type":"counterparty","external_id":"cp_100",
+       "display_name":"Your Actual Supplier Ltd",
+       "attributes":{"status":"VERIFIED","country":"US"}}' | jq -c .resource
+```
+
+---
 
 ---
 
@@ -313,7 +373,9 @@ The full JSON Schema is at `spec/policy.schema.json`, generated from the code an
 drift-tested in CI. A ready-to-edit treasury pack is at `policies/treasury-wire.yaml`
 (see `policy-pack-treasury.md`).
 
-Publishing a policy is three calls — create, two independent reviews, activate:
+Publishing a policy is three calls — create, **two reviews by humans who did not
+author it**, activate. The author cannot approve their own version, so the
+smallest tenant that can activate a policy has three humans in it:
 
 ```bash
 curl -sS -X POST $ALTUS/v1/policy-versions -H "authorization: Bearer $ADMIN" \

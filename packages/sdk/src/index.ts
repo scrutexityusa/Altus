@@ -245,30 +245,54 @@ export class ScrutexityClient {
   }
 
   /**
-   * Runs `execute` only if the action is authorised, and records what happened
-   * against the grant either way.
+   * Authorize an operation and execute it through the enforcement boundary.
    *
-   * This is the shape the SDK wants callers to reach for: the check and the act
-   * cannot drift apart, and the evidence is not something anyone has to
-   * remember to write.
+   * This is the shape the SDK wants callers to reach for, and it takes no
+   * callback on purpose. Scrutexity performs the operation; the caller does
+   * not. So there is no window between the check and the act for the operation
+   * to change, because there is no moment when the caller holds an approved
+   * decision and an unexecuted side effect at the same time.
+   *
+   * The operation sent to the boundary is derived from the same request that
+   * was authorized, so the two cannot drift. The boundary recomputes the
+   * authorized operation from its own records and compares hashes; a mismatch
+   * is INTENT_MISMATCH and the provider is never contacted.
+   *
+   * ## What this replaced, and why it mattered
+   *
+   * This method used to take an `execute` callback, run it, and report the
+   * outcome to `POST /v1/executions` -- the self-reported path, which verifies
+   * nothing about the operation because it never sees one. So the SDK's
+   * pleasant, obvious, documented helper was the *unenforced* path, and the
+   * enforced one was a separate method a caller had to know to look for. The
+   * easy path has to be the safe path, or the safe path is decoration.
+   *
+   * If a side effect genuinely cannot be routed through a provider, the honest
+   * thing is `recordExternalExecution()`. It is a different verb because it
+   * means a different thing.
+   *
+   * Read `execution.status` rather than assuming success. `UNKNOWN` means the
+   * provider did not answer: the grant is spent and whether the operation
+   * happened is not something this system can tell you. Retrying is not safe
+   * without reconciling first.
    */
-  async guard<T>(
-    request: AuthorizeRequest,
-    execute: (decision: AuthorizationDecision) => Promise<T>,
-  ): Promise<{ decision: AuthorizationDecision; result: T | null }> {
+  async guard(request: AuthorizeRequest): Promise<{
+    decision: AuthorizationDecision;
+    /** Null unless the decision was an ALLOW and the boundary was reached. */
+    execution: ExecutionResult | null;
+  }> {
     const decision = await this.authorize(request);
-    if (!decision.allowed) return { decision, result: null };
+    if (!decision.allowed) return { decision, execution: null };
 
-    try {
-      const result = await execute(decision);
-      await this.recordExecution(decision.decisionId, 'SUCCEEDED', { ok: true });
-      return { decision, result };
-    } catch (error) {
-      await this.recordExecution(decision.decisionId, 'FAILED', {
-        error: error instanceof Error ? error.message : String(error),
-      }).catch(() => undefined);
-      throw error;
-    }
+    const execution = await this.execute(decision.decisionId, {
+      action: request.action,
+      resource:
+        typeof request.resource === 'string'
+          ? parseResourceRef(request.resource)
+          : request.resource,
+      context: request.context ?? {},
+    });
+    return { decision, execution };
   }
 
   /**
@@ -301,14 +325,25 @@ export class ScrutexityClient {
   }
 
   /**
-   * Records an execution the caller performed itself.
+   * Records an execution the caller performed itself, against a grant.
    *
-   * Scrutexity verified nothing about the operation here, because it never saw
-   * one -- evidence written on this path carries `enforced: false`. Prefer
-   * `execute()`, which is the enforced path, wherever the side effect can be
-   * routed through a provider.
+   * **This is not governed execution.** Scrutexity verified nothing about the
+   * operation, because it never saw one: it has the caller's word that
+   * something happened and no way to check that what happened is what was
+   * authorised. Evidence written on this path carries `enforced: false` and
+   * should be read that way by anyone auditing it.
+   *
+   * The name is deliberately unpleasant, and it is a different verb rather
+   * than a flag on `guard()`. A boolean like `unenforced: true` would keep two
+   * fundamentally different semantics inside one method that reads as safe,
+   * and the previous version of this SDK demonstrated exactly where that
+   * leads: the ergonomic helper silently used this path for every caller.
+   *
+   * Reach for it only when a side effect genuinely cannot be routed through a
+   * provider, and treat that as a gap in the integration rather than a
+   * destination.
    */
-  async recordExecution(
+  async recordExternalExecution(
     decisionId: string,
     status: 'SUCCEEDED' | 'FAILED',
     result: Record<string, unknown> = {},
