@@ -197,23 +197,56 @@ mutable "latest" key. Decisions pin `policy_version_id` **and** `policy_hash`.
 
 ## Gaps, ranked
 
-| #        | Gap                                                                 | Severity | Validated | Fixed        | Regression-tested     | Operationally verified  |
-| -------- | ------------------------------------------------------------------- | -------- | --------- | ------------ | --------------------- | ----------------------- |
-| G-2      | `leases:write` could issue unbounded authority                      | Critical | ✅        | ✅           | ✅ 9 tests            | —                       |
-| G-4      | No runtime invariant assertion before ALLOW                         | High     | ✅        | ✅           | ✅ 16 + 5 tests       | —                       |
-| G-14     | `read` scope never enforced; reads not subject-scoped               | High     | ✅        | ✅           | ✅ 15 tests           | —                       |
-| G-3      | Containment checked at creation only                                | Medium   | ✅        | ✅ (via G-4) | ✅                    | —                       |
-| **G-12** | **Expiry judged on the API clock, rows written on the DB clock**    | **High** | ✅        | ✅           | ✅ 20 tests           | **NOT YET — see below** |
-| G-5      | HMAC signal secrets stored in plaintext; unenrolled sources trusted | High     | ✅        | ✅           | ✅ 25 + 10 tests, A7  | **NOT YET — see below** |
-| G-19     | A signal could make an uncovered request approvable                 | High     | ✅        | ✅           | ✅ property + 3 tests | —                       |
-| G-7      | Reconciliation surfaces UNKNOWN but cannot resolve it               | Medium   | ✅        | —            | —                     | —                       |
-| G-6      | Signal source not bound to signal type                              | Medium   | ✅        | —            | —                     | —                       |
-| G-15     | No rate limiting anywhere                                           | Medium   | ✅        | —            | —                     | —                       |
-| G-11     | No external evidence anchor                                         | Medium   | ✅        | —            | —                     | —                       |
-| G-1      | Bearer token only; no workload-bound identity                       | Medium   | ✅        | —            | —                     | —                       |
-| G-8      | No `HUMAN_REVIEW_REQUIRED` state                                    | Low      | ✅        | —            | —                     | —                       |
-| G-13     | No offline-verifiable evidence export                               | Low      | ✅        | —            | —                     | —                       |
-| G-9      | Unenforced self-report path still exists                            | Low      | ✅        | n/a          | n/a                   | —                       |
+Every gap carries all five statuses. They are not the same question, and
+collapsing them is how a control ends up believed rather than verified:
+
+| Stage                      | Means                                                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Discovered**             | Someone noticed it. Nothing more.                                                                          |
+| **Validated**              | Reproduced against running code. It is real, not a reading of the source.                                  |
+| **Fixed**                  | The code changed.                                                                                          |
+| **Regression-tested**      | A named test or adversarial scenario fails if the fix is removed. The bar that survives a refactor.        |
+| **Operationally verified** | Confirmed in a deployment that resembles production. Nothing here can reach this without a design partner. |
+
+`—` in the last column is honest rather than pending: it means this project has
+no production deployment, so no fix has been operationally verified by anyone.
+
+| #        | Gap                                                                                                        | Severity     | Disc. | Valid. |      Fixed      | Regression-tested                                                                                                                    | Op. verified            |
+| -------- | ---------------------------------------------------------------------------------------------------------- | ------------ | :---: | :----: | :-------------: | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
+| G-2      | `leases:write` could issue unbounded authority                                                             | Critical     |  ✅   |   ✅   |       ✅        | `security.test.ts` › "issuance is bounded by the role, not by the scope" (9); adversarial **A4**                                     | —                       |
+| G-4      | No runtime invariant assertion before ALLOW                                                                | High         |  ✅   |   ✅   |       ✅        | `authority-invariants.test.ts` (16); `security.test.ts` › "the authority invariants are enforced at runtime" (5); adversarial **A3** | —                       |
+| G-14     | `read` scope never enforced; reads not subject-scoped                                                      | High         |  ✅   |   ✅   |       ✅        | `security.test.ts` › "an agent cannot read the control plane" (2) + "…another agent’s records" (6); adversarial **A5**               | —                       |
+| G-3      | Containment checked at creation only                                                                       | Medium       |  ✅   |   ✅   |  ✅ (via G-4)   | `invariants.test.ts` containment property (2,000 cases)                                                                              | —                       |
+| **G-12** | **Expiry judged on the API clock, rows written on the DB clock**                                           | **High**     |  ✅   |   ✅   |       ✅        | `packages/core/test/temporal.test.ts` + `services/api/test/temporal.test.ts` (20); adversarial **A1**, **A6**                        | **NOT YET — see below** |
+| **G-16** | **The execution claim was rolled back with the provider call inside one transaction**                      | **Critical** |  ✅   |   ✅   |       ✅        | `enforcement.test.ts` crash cases; adversarial **A9**, **A10**, **A11**; recovery **R1**, **R2**, **R3** (real SIGKILL)              | **NOT YET — see below** |
+| G-5      | HMAC signal secrets in plaintext; unenrolled sources trusted; algorithm rule enforced at registration only | High         |  ✅   |   ✅   |       ✅        | `services/api/test/signals.test.ts` (25); `packages/core/test/nextphase.test.ts`; adversarial **A7**                                 | **NOT YET — see below** |
+| G-19     | A signal could make an uncovered request approvable                                                        | High         |  ✅   |   ✅   |       ✅        | `invariants.test.ts` signal containment property (1,500 cases) + named regression (3); `policy-pack.test.ts`                         | —                       |
+| G-10     | Approval expiry compared against the API node's clock                                                      | High         |  ✅   |   ✅   |  ✅ (via G-12)  | `services/api/test/temporal.test.ts` approval skew cases                                                                             | —                       |
+| G-7      | Reconciliation surfaces UNKNOWN but cannot resolve it                                                      | Medium       |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-6      | Signal source not bound to signal type                                                                     | Medium       |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-15     | No rate limiting anywhere                                                                                  | Medium       |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-11     | No external evidence anchor                                                                                | Medium       |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-1      | Bearer token only; no workload-bound identity                                                              | Medium       |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-8      | No `HUMAN_REVIEW_REQUIRED` state                                                                           | Low          |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-13     | No offline-verifiable evidence export                                                                      | Low          |  ✅   |   ✅   |        —        | —                                                                                                                                    | —                       |
+| G-9      | Unenforced self-report path still exists (`POST /v1/executions`)                                           | Low          |  ✅   |   ✅   | n/a — by design | `api-quickstart.md` documents it as not enforcement                                                                                  | —                       |
+
+### The one gap that gates production
+
+**No key manager is wired.** Production requires `SECRET_PROVIDER=kms`, and
+`KmsSecretProvider` throws on every read because nothing is connected behind it.
+The process therefore refuses to start rather than falling back to local key
+custody — the correct failure, and the reason this is not filed as a defect.
+
+It does mean, stated without hedging: **no deployment of this code has ever
+started in a production posture.** Every "Fixed" and "Regression-tested" above is
+established against development and test configurations. Nothing in the
+Operationally verified column can change until a design partner's infrastructure
+says which key manager, and the integration seam is defined in
+`docs/design-partner/integration-runbook.md` §2 rather than guessed at here.
+
+Tracked as a deployment prerequisite, not a gap number, because there is no
+defect to fix — there is a decision only a partner can make.
 
 ### G-12, and what "operationally verified" would require
 

@@ -145,6 +145,64 @@ would use. Dropping some legitimate signals is the correct trade.
 Both states are enforced at verification against the authoritative database
 clock (ADR-0017), so a source with a fast clock cannot extend its own window.
 
+## Addendum, design-partner phase
+
+Three decisions taken while preparing the first partner package. None changes the
+decision above; all three change how it is operated or presented.
+
+### The starter pack is a second policy file, not a rename
+
+`policies/treasury-wire.yaml` (hyphen) is the file a partner copies.
+`policies/treasury_wire.yaml` (underscore) stays as the reference tenant's policy
+for the seed, the demo and the test suite.
+
+The alternative — one file serving both — was rejected because the two have
+genuinely different jobs. The reference policy is tuned to make the demo's story
+legible; the starter is parameterised with `CHANGE ME` markers and carries the
+reasoning a partner needs to edit it safely. Merging them would mean the demo
+narrative constrains a partner's defaults, or the partner's placeholders leak
+into the demo.
+
+Two files can drift, so the starter is asserted directly by
+`packages/core/test/policy-pack.test.ts` (20 cases) rather than assumed to
+resemble its sibling: every tier boundary, the fail-closed settings, the
+non-delegable actions, the `$0.00` treasurer ceiling, and that no signal can
+expand authority. A partner who moves a threshold finds out which rule broke.
+
+### The permitted-algorithm list is a deployment posture, not a build-time constant
+
+`SIGNAL_LEGACY_HMAC` was introduced as `refused` by default in **development as
+well as production**, rather than as a production-only check.
+
+The reasoning is the one this ADR already makes about fallbacks, applied to
+ourselves: a fallback that exists locally is a fallback the tests exercise and
+production does not, and the suite then proves nothing about the path that ships.
+Converting the existing HMAC key-lifecycle tests to Ed25519 was the concrete
+benefit — before that, the only end-to-end exercise of rotation, grace periods and
+revocation ran on the algorithm the product refuses.
+
+A deployment still migrating a legacy source sets `permitted` deliberately, and
+production refuses to boot with it.
+
+### The KMS gap is a deployment prerequisite, not a gap number
+
+`KmsSecretProvider` throwing on every read is the specified behaviour, not an
+unfinished one: production refuses to start rather than falling back to local
+custody.
+
+It is therefore recorded in `docs/security-surface-map.md` as a **deployment
+prerequisite** rather than as a numbered gap, because there is no defect to fix —
+there is a decision only a partner can make. Which manager, and whether the key
+must never leave it, are questions with different answers per partner. A
+never-leaves design (Vault Transit, HSM-backed signing) needs a signing-oriented
+interface rather than the current fetching one; that is a real change and it will
+be scoped against a partner's obligation rather than guessed at in advance.
+
+What this costs us, stated so it is not discovered later: **no deployment of this
+code has ever started in a production posture.** Every claim in this ADR is
+established against development and test configurations. The integration seam is
+`docs/design-partner/integration-runbook.md` §2.
+
 ## Consequences
 
 - A new signal source cannot send anything until an operator enrols it. This is

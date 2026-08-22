@@ -30,32 +30,43 @@ backed by real Postgres and asserts every outcome, so a broken demo fails the
 build.
 
 ```bash
-make api      # the control plane, with reload
-make web      # the dashboard
-make test     # 206 tests
-make ci       # everything CI runs
+make api          # the control plane, with reload
+make web          # the dashboard
+make test         # 554 tests
+make adversarial  # 11 security invariants, mounted as real attacks
+make recovery     # SIGKILL the API mid-payment; assert what survived
+make ci           # everything above
 ```
+
+`make adversarial` and `make recovery` are the two worth running if you are
+evaluating this rather than developing it. Neither is an alias for a subset of
+the unit tests: the first mounts real attacks through the public API against a
+real database, and the second destroys a real process between the execution
+claim and the payment, then proves a different process refuses to retry.
 
 ---
 
 ## What the demo shows
 
-| Scene | What happens                                                               | Outcome                           |
-| ----- | -------------------------------------------------------------------------- | --------------------------------- |
-| 1     | Two agents, each owned by a named human                                    | —                                 |
-| 2     | Scoped authority issued: `wire.*` on two accounts, $50,000 ceiling, 1h TTL | —                                 |
-| 3     | A $25,000 wire                                                             | **ALLOW**, single-use grant, 300s |
-| 3b    | The same grant presented twice                                             | **REPLAY_DETECTED**               |
-| 4     | A $250,000 wire — inside its role, beyond its discretion                   | **ESCALATE**, treasurer           |
-| 5     | The treasurer approves                                                     | **ALLOW**, superseding decision   |
-| 5b    | The CFO tries to approve the same request                                  | **STATE_CONFLICT**                |
-| 6     | Counterparty verification delegated to a second agent                      | depth 1, clamped TTL              |
-| 6b    | Delegating `wire.execute` as well                                          | **ACTION_NOT_DELEGABLE**          |
-| 7     | The delegated agent attempts `wire.modify`                                 | **DENY**, with a full explanation |
-| 8     | `fraud_risk = 0.97` arrives from an external engine                        | authority narrows                 |
-| 8b    | The same $25,000 wire that ran unattended a minute ago                     | **ESCALATE**                      |
-| 9     | The parent lease is revoked                                                | both agents refused, immediately  |
-| 10    | Evidence verified; then a tampered receipt                                 | **INTACT**, then **COMPROMISED**  |
+| Scene | What happens                                                               | Outcome                                    |
+| ----- | -------------------------------------------------------------------------- | ------------------------------------------ |
+| 1     | Two agents, each owned by a named human                                    | —                                          |
+| 2     | Scoped authority issued: `wire.*` on two accounts, $50,000 ceiling, 1h TTL | —                                          |
+| 3     | A $25,000 wire                                                             | **ALLOW**, single-use grant, 300s          |
+| 3b    | The same grant presented twice                                             | **REPLAY_DETECTED**                        |
+| 4     | A $75,000 wire — inside its role, beyond its discretion                    | **ESCALATE**, treasurer                    |
+| 5     | The treasurer approves                                                     | **ALLOW**, superseding decision            |
+| 5b    | The CFO tries to approve the same request                                  | **STATE_CONFLICT**                         |
+| 6     | Counterparty verification delegated to a second agent                      | depth 1, clamped TTL                       |
+| 6b    | Delegating `wire.execute` as well                                          | **ACTION_NOT_DELEGABLE**                   |
+| 7     | The delegated agent attempts `wire.modify`                                 | **DENY**, with a full explanation          |
+| 8     | The amount is mutated after authorization, at the execution boundary       | **INTENT_MISMATCH**, before the provider   |
+| 8b    | The operation it was actually authorized for                               | **EXECUTED**, hashes match                 |
+| 9     | `GET /v1/trace/{id}` on the approved wire                                  | causal chain back to the policy activation |
+| 10    | `fraud_risk = 0.97` arrives, signed, from an external engine               | authority narrows                          |
+| 10b   | The same $25,000 wire that ran unattended a minute ago                     | **ESCALATE**                               |
+| 11    | The parent lease is revoked                                                | both agents refused, immediately           |
+| 12    | Evidence verified; then a tampered receipt                                 | **INTACT**, then **COMPROMISED**           |
 
 ---
 
@@ -137,10 +148,13 @@ packages/sdk      typed client and enforcement point
 services/api      HTTP surface, persistence, tenancy, idempotency, observability
 apps/web          dashboard over the API's own read model
 db/migrations     schema, row level security, append-only triggers
-policies/         the demonstration treasury pack
+policies/         the demonstration pack (treasury_wire) and the partner starter (treasury-wire)
 spec/             generated OpenAPI and policy JSON Schema, drift-checked in CI
 deploy/k8s        deployment and sidecar templates
 docs/             architecture, models, threat model, contract, ADRs
+docs/design-partner/  the evaluation package: security brief, demo script,
+                      API quickstart, policy pack, integration runbook,
+                      pilot plan, red team handoff
 ```
 
 ## Using it

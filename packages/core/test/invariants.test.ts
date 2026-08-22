@@ -9,7 +9,7 @@ import {
 import { authorizeDelegation } from '../src/delegation.js';
 import { evaluateAuthorization } from '../src/evaluate.js';
 import { parseMoney } from '../src/money.js';
-import { lease, snapshot, treasuryPolicy, T0 } from './fixtures.js';
+import { lease, snapshot, treasuryPolicy, T0, type SnapshotOptions } from './fixtures.js';
 
 /**
  * Containment is a property of the authority lattice, not of any one policy.
@@ -269,6 +269,8 @@ describe('invariant: a signal can only ever subtract authority', () => {
       //    held. A decision that stayed the same while the grant behind it
       //    widened is a defect waiting for the next request.
       for (const finding of withSignals.evaluation.authority_findings) {
+        // Null when no effect applied, which is itself containment holding.
+        if (!finding.effective_grant) continue;
         expect(
           containsGrant(candidate.grant, finding.effective_grant).contained,
           `${context()}: signal widened the effective grant`,
@@ -305,7 +307,7 @@ describe('regression: a signal cannot make a refusal approvable (G-5)', () => {
       },
     });
 
-  const evaluateWith = (signals: Parameters<typeof snapshot>[0]['signals']) => {
+  const evaluateWith = (signals: SnapshotOptions['signals']) => {
     const candidate = eurOnlyLease();
     return evaluateAuthorization(
       snapshot({

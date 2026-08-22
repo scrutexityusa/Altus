@@ -105,8 +105,11 @@ test-unit: ## Run the pure-domain tests (no database required)
 	pnpm exec vitest run packages
 
 .PHONY: typecheck
-typecheck: ## Typecheck every package
-	pnpm exec tsc -b tsconfig.build.json
+typecheck: ## Typecheck every package, sources and tests
+	# Both passes, matching CI exactly. tsconfig.build.json excludes test files,
+	# so a type error in a test escaped `make lint` entirely and only surfaced
+	# in CI. A local gate that is weaker than the remote one is not a gate.
+	pnpm run typecheck
 
 .PHONY: fmt
 fmt: ## Format
@@ -115,8 +118,9 @@ fmt: ## Format
 .PHONY: lint
 lint: ## Check formatting, types and contract drift
 	pnpm exec prettier --check .
-	pnpm exec tsc -b tsconfig.build.json
+	pnpm run typecheck
 	pnpm exec tsx scripts/generate-specs.ts --check
+	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
 .PHONY: spec
 spec: ## Regenerate the OpenAPI and policy schema from the code
