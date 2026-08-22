@@ -18,6 +18,11 @@ import { ERROR_CODES, GrantSchema, KNOWN_ACTIONS } from '@scrutexity/core';
 import {
   AuthorizationRequestSchema,
   CreateAgentSchema,
+  CreateResourceSchema,
+  CreateUserSchema,
+  IssueCredentialSchema,
+  UpdateResourceSchema,
+  UpdateUserSchema,
   CreateDelegationSchema,
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
@@ -502,6 +507,11 @@ function buildOpenApi(): unknown {
         PolicyRule: jsonSchema(RuleSchema, 'PolicyRule'),
         PolicyMatcher: jsonSchema(MatcherSchema, 'PolicyMatcher'),
         CreateAgentRequest: jsonSchema(CreateAgentSchema, 'CreateAgentRequest'),
+        CreateUserRequest: jsonSchema(CreateUserSchema, 'CreateUserRequest'),
+        UpdateUserRequest: jsonSchema(UpdateUserSchema, 'UpdateUserRequest'),
+        IssueCredentialRequest: jsonSchema(IssueCredentialSchema, 'IssueCredentialRequest'),
+        CreateResourceRequest: jsonSchema(CreateResourceSchema, 'CreateResourceRequest'),
+        UpdateResourceRequest: jsonSchema(UpdateResourceSchema, 'UpdateResourceRequest'),
         AuthorizationRequest: {
           ...jsonSchema(AuthorizationRequestSchema, 'AuthorizationRequest'),
           description: [
@@ -608,6 +618,121 @@ function buildOpenApi(): unknown {
       },
     },
     paths: {
+      '/v1/users': {
+        post: {
+          tags: ['Tenant setup'],
+          summary: 'Create a human principal',
+          description:
+            'Requires `admin:write` and a human caller. Not an identity system: no password, ' +
+            'no session, no directory sync. A user exists so an approval can name who gave it ' +
+            'and so a policy’s approval roles have something to match against. `roles` is the ' +
+            'tenant’s own vocabulary.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/CreateUserRequest' }),
+          responses: {
+            '201': jsonResponse('The user was created.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+        get: {
+          tags: ['Tenant setup'],
+          summary: 'List the humans in this tenant',
+          responses: { '200': jsonResponse('Users.', { type: 'object' }), ...ERROR_RESPONSES },
+        },
+      },
+      '/v1/users/{id}': {
+        get: {
+          tags: ['Tenant setup'],
+          summary: 'User detail',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': jsonResponse('User.', { type: 'object' }), ...ERROR_RESPONSES },
+        },
+        patch: {
+          tags: ['Tenant setup'],
+          summary: 'Change roles, display name, or disable',
+          description:
+            'Disabling is terminal rather than deletion: a user who approved a payment must ' +
+            'remain nameable forever, and an approval whose approver cannot be named is not ' +
+            'evidence of anything.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/UpdateUserRequest' }),
+          responses: { '200': jsonResponse('User.', { type: 'object' }), ...ERROR_RESPONSES },
+        },
+      },
+      '/v1/credentials': {
+        post: {
+          tags: ['Tenant setup'],
+          summary: 'Issue a credential to a principal in this tenant',
+          description:
+            'Requires `admin:write` and a human caller. The secret is generated server-side and ' +
+            'returned **exactly once**; Scrutexity stores a SHA-256 and a non-secret lookup ' +
+            'prefix, and no endpoint can produce the token again.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/IssueCredentialRequest' }),
+          responses: {
+            '201': jsonResponse('The credential and its one-time token.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+        get: {
+          tags: ['Tenant setup'],
+          summary: 'List credentials — operational metadata only',
+          description: 'Never returns token or hash material. Includes `last_used_at`.',
+          responses: {
+            '200': jsonResponse('Credentials.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/credentials/{id}/revoke': {
+        post: {
+          tags: ['Tenant setup'],
+          summary: 'Revoke a credential',
+          description:
+            'Immediate. Authentication reads status on every request and there is no credential ' +
+            'cache, so the next call with this token is a 401.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': jsonResponse('The revoked credential.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/resources': {
+        post: {
+          tags: ['Tenant setup'],
+          summary: 'Register a bank account or counterparty',
+          description:
+            'Requires `admin:write` and a human caller. `counterparty_known` is derived from the ' +
+            'EXISTENCE of a row here and never from anything a caller asserts, so registering a ' +
+            'counterparty is the act that makes money movable to it. An agent cannot do this.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/CreateResourceRequest' }),
+          responses: {
+            '201': jsonResponse('The resource was registered.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+        get: {
+          tags: ['Tenant setup'],
+          summary: 'List registered resources',
+          parameters: [{ name: 'resource_type', in: 'query', schema: { type: 'string' } }],
+          responses: { '200': jsonResponse('Resources.', { type: 'object' }), ...ERROR_RESPONSES },
+        },
+      },
+      '/v1/resources/{id}': {
+        patch: {
+          tags: ['Tenant setup'],
+          summary: 'Update a resource’s display name or policy-readable attributes',
+          description:
+            'Deliberately no delete: a counterparty that has been paid is referenced by decisions ' +
+            'and receipts. To stop paying one, change the attribute the policy reads — the refusal ' +
+            'is then a policy decision with a reason code.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/UpdateResourceRequest' }),
+          responses: { '200': jsonResponse('Resource.', { type: 'object' }), ...ERROR_RESPONSES },
+        },
+      },
       '/v1/agents': {
         post: {
           tags: ['Agents'],

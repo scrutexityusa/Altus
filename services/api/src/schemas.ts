@@ -25,6 +25,92 @@ export const CreateAgentSchema = z
   })
   .strict();
 
+/**
+ * A human principal. Deliberately the narrowest shape the existing model
+ * already understands -- name, email, roles, and the organization the
+ * credential resolved to. This is not an identity system: there is no password,
+ * no session, no invitation flow and no directory sync, because none of those
+ * are things Scrutexity decides anything with.
+ *
+ * `roles` is the tenant's own vocabulary. The approval requirements in a policy
+ * match on these strings, so `treasurer` here and `roles: [treasurer]` in the
+ * policy are the same fact stated in two places, which is the intended
+ * coupling: an organization names its roles once and both sides read it.
+ */
+export const CreateUserSchema = z
+  .object({
+    email: z.string().email().max(320),
+    display_name: z.string().min(1).max(200),
+    /** Free-form and tenant-defined; the policy's approval roles reference these. */
+    roles: z.array(z.string().min(1).max(64)).max(32).default([]),
+  })
+  .strict();
+
+export const UpdateUserSchema = z
+  .object({
+    display_name: z.string().min(1).max(200).optional(),
+    roles: z.array(z.string().min(1).max(64)).max(32).optional(),
+    /**
+     * DISABLED keeps the row and stops the principal acting. Deleting a user
+     * who has approved something would orphan the approval, and an approval
+     * whose approver cannot be named is not evidence of anything.
+     */
+    status: z.enum(['ACTIVE', 'DISABLED']).optional(),
+  })
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, { message: 'no fields to update' });
+
+/**
+ * Issue a credential to a principal that already exists in this tenant.
+ *
+ * The secret is generated server-side and returned exactly once. There is no
+ * field for the caller to supply one: a credential a client chose is a
+ * credential a client can have chosen badly, and one that arrived over the
+ * wire is one that was in a request log.
+ */
+export const IssueCredentialSchema = z
+  .object({
+    principal_type: z.enum(['user', 'agent', 'service']),
+    /** A user id, an agent id or handle, or a service name. */
+    principal_id: z.string().min(1).max(128),
+    scopes: z.array(z.string().min(1).max(64)).min(1).max(16),
+    /** Optional lifetime. Absent means the credential expires only on revocation. */
+    expires_in_seconds: z.number().int().min(60).max(31_536_000).optional(),
+  })
+  .strict();
+
+/**
+ * Register a bank account or a counterparty.
+ *
+ * `resource_type` is open text in the schema and closed in practice: the action
+ * catalog decides which types an action can name, so registering a type nothing
+ * references simply produces a row no policy reads. Constraining it here would
+ * be a second catalog to keep in sync with the first.
+ *
+ * `attributes` is what policy reads under `resource.attributes.*`. For a
+ * counterparty, `status` is the conventional one -- but note that
+ * `counterparty_known` is derived from the row EXISTING, not from any attribute
+ * in it. Registering a counterparty is the act that makes it known; there is no
+ * field a caller can set to claim it.
+ */
+export const CreateResourceSchema = z
+  .object({
+    resource_type: z.string().min(1).max(64),
+    /** The id an agent will name in an authorization request, e.g. "acct_001". */
+    external_id: z.string().min(1).max(128),
+    display_name: z.string().min(1).max(200),
+    attributes: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
+export const UpdateResourceSchema = z
+  .object({
+    display_name: z.string().min(1).max(200).optional(),
+    attributes: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, { message: 'no fields to update' });
+
 export const AuthorizationRequestSchema = z
   .object({
     agent_id: z.string().min(1).max(128),

@@ -85,7 +85,9 @@ describe('unauthenticated and malformed credentials', () => {
     const token = h.other.tokens['fraud_engine']!;
     await asOwner(async (client) => {
       await client.query(
-        `UPDATE scrutexity.api_credentials SET status = 'REVOKED'
+        // revoked_at moves with status: migration 0010 makes the pair a CHECK
+        // constraint, so "revoked" and "when" cannot drift apart.
+        `UPDATE scrutexity.api_credentials SET status = 'REVOKED', revoked_at = now()
           WHERE token_prefix = $1`,
         [token.slice(4).split('.')[0]],
       );

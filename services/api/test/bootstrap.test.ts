@@ -106,6 +106,63 @@ describe('bootstrap creates the first tenant and nothing more', () => {
     ).rejects.toMatchObject({ code: 'ALREADY_BOOTSTRAPPED' });
   });
 
+  it('leaves no partial second installation behind', async () => {
+    // The assertion that matters, and it is not "the second call errored".
+    // It is that a refused ceremony left *nothing* -- no organization, no
+    // administrator, no credential, and an installation marker still pointing
+    // at the first tenant. An error return with a half-built second tenant
+    // behind it would be worse than no guard at all, because the wreckage
+    // would be invisible to the operator who saw the error and moved on.
+    const second = {
+      ...input,
+      orgName: 'Totally Different Corp',
+      orgSlug: 'totally-different-corp',
+      adminEmail: 'someone@different.example',
+    };
+    await expect(bootstrap(second)).rejects.toMatchObject({ code: 'ALREADY_BOOTSTRAPPED' });
+
+    const state = await asOwner(async (client) => {
+      // The org id is unknown -- it was never created -- so the tenant context
+      // is set to the FIRST organization. Anything belonging to the second
+      // would be invisible under it, so these queries are deliberately written
+      // to catch rows by their *content* rather than by tenant.
+      await client.query('SELECT set_config($1,$2,false)', [
+        'scrutexity.org_id',
+        result.organization_id,
+      ]);
+      const orgs = await client.query(`SELECT id FROM scrutexity.organizations WHERE slug = $1`, [
+        second.orgSlug,
+      ]);
+      const users = await client.query(`SELECT id FROM scrutexity.users WHERE email = $1`, [
+        second.adminEmail,
+      ]);
+      // api_credentials is RLS-enabled-but-not-forced, so this count is the
+      // whole installation's, across every tenant -- exactly what is wanted
+      // here: one credential exists anywhere, and it is the first tenant's.
+      const creds = await client.query<{ organization_id: string }>(
+        `SELECT organization_id FROM scrutexity.api_credentials`,
+      );
+      const marker = await client.query<{ organization_id: string }>(
+        `SELECT organization_id FROM scrutexity.installation`,
+      );
+      return {
+        orgs: orgs.rows,
+        users: users.rows,
+        credOrgs: creds.rows.map((r) => r.organization_id),
+        marker: marker.rows,
+      };
+    });
+
+    expect(state.orgs, 'the second organization must not exist').toEqual([]);
+    expect(state.users, 'the second administrator must not exist').toEqual([]);
+    expect(state.credOrgs, 'no credential may belong to the second tenant').toEqual([
+      result.organization_id,
+    ]);
+    expect(state.marker, 'the marker still points at the first tenant').toEqual([
+      { organization_id: result.organization_id },
+    ]);
+  });
+
   it('refuses a second ceremony under the same name', async () => {
     await expect(bootstrap(input)).rejects.toBeInstanceOf(BootstrapError);
   });
