@@ -1,21 +1,51 @@
 # The treasury policy pack
 
-**File:** `policies/treasury-wire.yaml`
+**File:** `policies/treasury-wire.yaml` — the one canonical treasury policy
 **Tested by:** `packages/core/test/policy-pack.test.ts` (20 cases)
 
-A ready-to-edit policy for a partner running outbound payments. Copy it, change
-the values marked `CHANGE ME`, and put it through your own code review.
+A ready-to-edit policy for outbound payments. Copy it, change the values marked
+`CHANGE ME`, and put it through your own code review.
 
-## Two files, on purpose
+## One file
 
-| File                                       | Used by                               | Edit it?                                 |
-| ------------------------------------------ | ------------------------------------- | ---------------------------------------- |
-| `policies/treasury_wire.yaml` (underscore) | the seed, `make demo`, the test suite | No — it is tuned for the reference story |
-| `policies/treasury-wire.yaml` (hyphen)     | **you**                               | Yes — this is the starter                |
+`policies/treasury-wire.yaml` is the **only** treasury policy in the repository.
+It is simultaneously:
 
-Two policy files could drift into disagreeing about what "the treasury ladder"
-means, so the starter pack is tested directly rather than assumed to resemble
-its sibling. Break a tier boundary and CI names the rule.
+- the reference tenant's policy, loaded by the seed and run by `make demo`;
+- the file you copy and edit.
+
+There used to be two — a demo policy and a separate starter pack — and collapsing
+them was the right call. Separate files drift, and two examples of "the treasury
+ladder" that disagree undermine the thing this product is selling: that
+policy-as-code becomes part of your system of record. One canonical artifact, or
+the argument does not hold.
+
+Because it is one file, this suite is load-bearing rather than supplementary:
+`packages/core/test/policy-pack.test.ts` pins every tier boundary by value, so
+moving a threshold names the boundary you changed.
+
+### Why there is no `parameters:` block
+
+The obvious way to get variants without duplicate files is a parameters block
+substituted into the rules. Deliberately not done, for two reasons.
+
+**The document that gets hashed onto every decision must be the document that
+was reviewed.** A template that renders into a policy means the reviewed artifact
+and the enforced artifact are different objects, and the content hash on every
+decision would point at the rendered one. That is a meaningful loss for
+something whose value is being replayable against exactly the bytes that
+produced a decision.
+
+**It would be a policy-language feature during an architecture freeze.** A
+schema change plus a substitution engine, built speculatively. Collapsing to one
+file removes the need: the demo and the partner use the same policy, so there is
+no variant to parameterise.
+
+If a partner turns out to need genuine environment variants — staging thresholds
+that differ from production — that is the moment to build it, against a stated
+requirement rather than a guess. The tunables are listed in one block at the top
+of the file meanwhile, and changed in place, where the diff a reviewer reads is
+the change itself.
 
 ## The ladder
 
@@ -219,9 +249,11 @@ pnpm exec vitest run packages/core/test/policy-pack.test.ts
 
 The suite pins every tier boundary, the counterparty controls, the fail-closed
 settings, the non-delegable actions, the `$0.00` treasurer ceiling, and that no
-signal can expand authority. Copy it alongside your policy and change the
-expectations to your thresholds — a policy change that moves a boundary should
-move a test, visibly, in the same commit.
+signal can expand authority. Change the expectations to your thresholds when you
+change the policy — a policy change that moves a boundary should move a test,
+visibly, in the same commit. Since this is the only treasury policy, that suite
+also guards the demo: a threshold edit that breaks a tier fails CI rather than
+producing a demo that quietly tells a different story.
 
 ## What the pack deliberately does not do
 

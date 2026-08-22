@@ -150,24 +150,39 @@ clock (ADR-0017), so a source with a fast clock cannot extend its own window.
 Three decisions taken while preparing the first partner package. None changes the
 decision above; all three change how it is operated or presented.
 
-### The starter pack is a second policy file, not a rename
+### There is one treasury policy, and no parameters block
 
-`policies/treasury-wire.yaml` (hyphen) is the file a partner copies.
-`policies/treasury_wire.yaml` (underscore) stays as the reference tenant's policy
-for the seed, the demo and the test suite.
+`policies/treasury-wire.yaml` is the only treasury policy in the repository. It
+serves the seed, the demo, the test suite and a design partner at once.
 
-The alternative — one file serving both — was rejected because the two have
-genuinely different jobs. The reference policy is tuned to make the demo's story
-legible; the starter is parameterised with `CHANGE ME` markers and carries the
-reasoning a partner needs to edit it safely. Merging them would mean the demo
-narrative constrains a partner's defaults, or the partner's placeholders leak
-into the demo.
+The first attempt split it in two — a demo policy tuned to make the story
+legible, and a `CHANGE ME`-marked starter for partners. That was wrong, and the
+reason is the product's own argument: policy-as-code is supposed to become part
+of a customer's system of record, and two examples of "the treasury ladder" that
+disagree undermine exactly that. Separate files drift. One canonical artifact, or
+the claim does not hold.
 
-Two files can drift, so the starter is asserted directly by
-`packages/core/test/policy-pack.test.ts` (20 cases) rather than assumed to
-resemble its sibling: every tier boundary, the fail-closed settings, the
-non-delegable actions, the `$0.00` treasurer ceiling, and that no signal can
-expand authority. A partner who moves a threshold finds out which rule broke.
+The obvious way to get variants without duplicate files is a `parameters:` block
+substituted into the rules. Deliberately not built:
+
+1. **The hashed document must be the reviewed document.** A template that renders
+   into a policy makes the reviewed artifact and the enforced artifact different
+   objects, and the content hash recorded on every decision would point at the
+   rendered one. Replayability against exactly the bytes that produced a decision
+   is worth more than the ergonomics.
+2. **It is a policy-language feature, built speculatively.** A schema change plus
+   a substitution engine, during a declared architecture freeze, for a variant
+   that collapsing the files removed the need for.
+
+The tunables are instead listed in one commented block at the top of the file and
+changed in place, so the diff a reviewer reads is the change itself. If a partner
+turns out to need genuine environment variants, that is the moment to build it —
+against a stated requirement rather than a guess.
+
+Behaviour is pinned by `packages/core/test/policy-pack.test.ts` (20 cases): every
+tier boundary by value, the fail-closed settings, the non-delegable actions, the
+`$0.00` treasurer ceiling, and that no signal can expand authority. With one
+file, that suite also guards the demo.
 
 ### The permitted-algorithm list is a deployment posture, not a build-time constant
 

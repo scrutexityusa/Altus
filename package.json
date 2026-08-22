@@ -11,6 +11,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
+    "altus": "tsx scripts/altus.ts",
     "typecheck": "tsc -b tsconfig.build.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:unit": "vitest run packages",
@@ -24,7 +25,8 @@
     "seed": "tsx scripts/seed.ts",
     "demo": "tsx scripts/demo.ts",
     "dev:api": "tsx watch services/api/src/server.ts",
-    "verify": "bash scripts/ci-verify.sh"
+    "verify": "bash scripts/ci-verify.sh",
+    "bootstrap": "tsx scripts/bootstrap.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

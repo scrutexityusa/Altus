@@ -9,23 +9,31 @@ import { lease, snapshot, T0, type SnapshotOptions } from './fixtures.js';
 
 /**
  * ============================================================================
- * The design-partner treasury policy pack.
+ * The treasury policy pack.
  * ============================================================================
  *
- * `policies/treasury-wire.yaml` is handed to a design partner as the file they
- * copy and edit. It is not the reference tenant's policy -- that is
- * `treasury_wire.yaml`, with an underscore, which the seed and the demo use.
+ * `policies/treasury-wire.yaml` is the single canonical treasury policy. It is
+ * the reference tenant's policy -- loaded by the seed, run by `make demo`,
+ * exercised by the rest of the suite -- and simultaneously the file a design
+ * partner copies and edits.
  *
- * Two policy files could drift into disagreeing about what "the treasury
- * ladder" means, so this asserts the starter pack's behaviour directly rather
- * than trusting that it still resembles its sibling. A partner who edits a
- * threshold and breaks a tier boundary finds out here, by name.
+ * There used to be two: a demo policy and a starter pack. Separate files drift,
+ * and two examples of "the treasury ladder" that disagree undermine the thing
+ * the product sells, which is that policy-as-code becomes part of a customer's
+ * system of record.
  *
- * Documented in docs/design-partner/policy-pack-treasury.md, and the tier
- * table in that document is what these cases pin.
+ * Collapsing them makes this suite load-bearing rather than supplementary. The
+ * rest of the tests use the policy through fixtures and assert behaviour around
+ * it; these cases pin the ladder itself -- every tier boundary by value, the
+ * fail-closed settings, the non-delegable actions, the $0 treasurer ceiling.
+ * A partner (or we) moving a threshold finds out here, by name, which boundary
+ * changed.
+ *
+ * The tier table in docs/design-partner/policy-pack-treasury.md is what these
+ * cases pin. If one changes, the other is wrong.
  */
 
-const starterPack: PolicyDocument = loadPolicyYaml(
+const treasuryPack: PolicyDocument = loadPolicyYaml(
   readFileSync(
     fileURLToPath(new URL('../../../policies/treasury-wire.yaml', import.meta.url)),
     'utf8',
@@ -54,7 +62,7 @@ function decide(options: SnapshotOptions = {}) {
   const candidate = wideLease();
   return evaluateAuthorization(
     snapshot({
-      policy: starterPack,
+      policy: treasuryPack,
       action: 'wire.execute',
       resourceId: 'acct_001',
       counterpartyId: 'cp_100',
@@ -78,31 +86,31 @@ const liveSignal = (signalType: string, value: string, subjectType: 'agent' | 'c
   },
 ];
 
-describe('the starter pack is a valid policy document', () => {
+describe('the canonical treasury pack is a valid policy document', () => {
   it('parses and declares what the documentation says it declares', () => {
-    expect(starterPack.id).toBe('treasury_wire_starter');
-    expect(starterPack.defaults.decision).toBe('DENY');
-    expect(starterPack.issuance.enforced).toBe(true);
+    expect(treasuryPack.id).toBe('treasury_wire');
+    expect(treasuryPack.defaults.decision).toBe('DENY');
+    expect(treasuryPack.issuance.enforced).toBe(true);
   });
 
   it('fails closed on every dependency', () => {
     // A control-plane outage must never become an authorization. All three,
     // asserted individually so that weakening one is a visible diff.
-    expect(starterPack.failure_modes.policy_unavailable).toBe('FAIL_CLOSED');
-    expect(starterPack.failure_modes.signal_unavailable).toBe('FAIL_CLOSED');
-    expect(starterPack.failure_modes.enforcement_unavailable).toBe('FAIL_CLOSED');
+    expect(treasuryPack.failure_modes.policy_unavailable).toBe('FAIL_CLOSED');
+    expect(treasuryPack.failure_modes.signal_unavailable).toBe('FAIL_CLOSED');
+    expect(treasuryPack.failure_modes.enforcement_unavailable).toBe('FAIL_CLOSED');
   });
 
   it('never permits a financial action to be delegated', () => {
     for (const action of ['wire.create', 'wire.modify', 'wire.submit', 'wire.execute']) {
-      expect(starterPack.delegation.non_delegable_actions).toContain(action);
+      expect(treasuryPack.delegation.non_delegable_actions).toContain(action);
     }
   });
 
   it('lets a treasurer issue nothing that can pay', () => {
     // A treasurer approves; they do not provision. The $0 ceiling is the
     // control, not a placeholder.
-    const treasurer = starterPack.issuance.ceilings.find((c) => c.role === 'treasurer');
+    const treasurer = treasuryPack.issuance.ceilings.find((c) => c.role === 'treasurer');
     expect(treasurer).toBeDefined();
     expect(treasurer!.grant.actions).not.toContain('wire.execute');
     expect(treasurer!.grant.constraints.max_amount?.amountMinor).toBe('0');

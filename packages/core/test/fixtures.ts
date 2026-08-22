@@ -13,7 +13,7 @@ export const T0 = new Date('2026-03-01T12:00:00.000Z');
 
 export const treasuryPolicy: PolicyDocument = loadPolicyYaml(
   readFileSync(
-    fileURLToPath(new URL('../../../policies/treasury_wire.yaml', import.meta.url)),
+    fileURLToPath(new URL('../../../policies/treasury-wire.yaml', import.meta.url)),
     'utf8',
   ),
 ).document;

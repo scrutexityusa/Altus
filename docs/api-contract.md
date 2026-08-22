@@ -213,37 +213,46 @@ Two mutations carry stronger protection than a key alone:
 ```ts
 const scrutexity = new ScrutexityClient({ baseUrl, token });
 
-const decision = await scrutexity.authorize({
+const { decision, execution } = await scrutexity.guard({
   agentId: 'treasury-agent',
   action: 'wire.execute',
   resource: 'bank_account:acct_991',
   context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
 });
 
-if (decision.allowed) {
-  await executeWire();
-  await scrutexity.recordExecution(decision.decisionId, 'SUCCEEDED');
-}
-```
-
-Better, because the check and the act cannot drift apart and the evidence is
-not something anyone has to remember to write:
-
-```ts
-const { decision, result } = await scrutexity.guard(
-  {
-    agentId: 'treasury-agent',
-    action: 'wire.execute',
-    resource: 'bank_account:acct_991',
-    context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
-  },
-  async () => executeWire(),
-);
-
 if (decision.requiresApproval) {
   notifyTreasurer(decision.approvalRequestId);
 }
 ```
+
+`guard` authorizes and then executes through the enforcement boundary. It takes
+no callback, deliberately: Scrutexity performs the operation, so there is no
+moment when the caller holds an approved decision and an unexecuted side effect.
+Nothing can drift between the check and the act, because they are one call.
+
+It used to take a callback, run it, and report the outcome to
+`POST /v1/executions` — the self-reported path, which verifies nothing about the
+operation because it never sees one. The SDK's pleasant, documented, obvious
+helper was the _unenforced_ path, and the enforced one was a separate method a
+caller had to know to look for. The easy path has to be the safe path, or the
+safe path is decoration. A route-level regression now asserts that `guard`
+produces `POST /v1/execute` and never `POST /v1/executions`.
+
+Read `execution.status` rather than assuming success. `UNKNOWN` means the
+provider did not answer: the grant is spent and whether the operation happened is
+not something this system can tell you.
+
+For a side effect that genuinely cannot be routed through a provider:
+
+```ts
+await scrutexity.recordExternalExecution(decision.decisionId, 'SUCCEEDED');
+```
+
+**This is not governed execution.** Scrutexity verified nothing about the
+operation; evidence written this way carries `enforced: false`. It is a
+different verb rather than a flag on `guard`, because a boolean would keep two
+fundamentally different semantics inside one method that reads as safe — which
+is precisely how the previous version went wrong.
 
 ### The corrective handshake
 

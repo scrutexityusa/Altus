@@ -32,7 +32,7 @@ build.
 ```bash
 make api          # the control plane, with reload
 make web          # the dashboard
-make test         # 554 tests
+make test         # 596 tests
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the API mid-payment; assert what survived
 make ci           # everything above
@@ -148,7 +148,7 @@ packages/sdk      typed client and enforcement point
 services/api      HTTP surface, persistence, tenancy, idempotency, observability
 apps/web          dashboard over the API's own read model
 db/migrations     schema, row level security, append-only triggers
-policies/         the demonstration pack (treasury_wire) and the partner starter (treasury-wire)
+policies/         the canonical treasury policy, used by the demo and by partners alike
 spec/             generated OpenAPI and policy JSON Schema, drift-checked in CI
 deploy/k8s        deployment and sidecar templates
 docs/             architecture, models, threat model, contract, ADRs
@@ -164,30 +164,35 @@ import { ScrutexityClient } from '@scrutexity/sdk';
 
 const scrutexity = new ScrutexityClient({ baseUrl, token });
 
-const { decision, result } = await scrutexity.guard(
-  {
-    agentId: 'treasury-agent',
-    action: 'wire.execute',
-    resource: 'bank_account:acct_991',
-    context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
-  },
-  async () => executeWire(),
-);
+const { decision, execution } = await scrutexity.guard({
+  agentId: 'treasury-agent',
+  action: 'wire.execute',
+  resource: 'bank_account:acct_991',
+  context: { amount: '750000.00', currency: 'USD', counterparty_id: 'cp_100' },
+});
 
 if (decision.requiresApproval) {
   notifyTreasurer(decision.approvalRequestId);
 }
 ```
 
-`guard` keeps the check and the act together and records the execution against
-the grant either way, so evidence is a consequence of using the SDK rather than
-a step someone has to remember. Only `ALLOW` is truthy — an escalation cannot
-be mistaken for a soft yes.
+`guard` takes no callback, deliberately. Scrutexity performs the operation
+through the enforcement boundary, so there is no moment when the caller holds an
+approved decision and an unexecuted side effect — nothing to drift apart, and
+the operation that reaches the provider is the one that was authorised or
+nothing reaches it at all. Only `ALLOW` is truthy; an escalation cannot be
+mistaken for a soft yes.
+
+If a side effect genuinely cannot be routed through a provider,
+`recordExternalExecution()` writes a self-reported record instead. It is a
+different verb because it means a different thing: Scrutexity verified nothing
+about that operation, and the evidence says so.
 
 ## Testing
 
-290 tests. `./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with
-no build output and no dependencies installed.
+596 tests across 19 files, plus two suites that are not tests of units at all.
+`./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with no build
+output and no dependencies installed.
 
 The ones that matter most are the invariants:
 
@@ -195,11 +200,30 @@ The ones that matter most are the invariants:
 child authority never exceeds parent authority     4,000 randomised proposals
 anything a child covers, its parent covers         3,000 randomised pairs
 authority decay only ever shrinks                  2,000 randomised restrictions
+a signal can only ever subtract authority          1,500 randomised signal sets
 no ALLOW without autonomous covering authority     2,000 randomised evaluations
 identical inputs produce identical decisions          300 randomised requests
-a signal can never move a decision towards yes         18 action/value pairs
 exactly one winner among ten concurrent claimants   a real race, real database
 ```
+
+The signal containment property found a real defect: a signal could convert a
+hard DENY into an approvable escalation, so asserting _more_ risk produced a
+_more_ permissive outcome (G-19).
+
+**`make adversarial`** — 11 security invariants, each mounted as a real attack
+through the public API against a real database. Temporal expiry at the boundary
+instant with a skewed clock, revocation of an ancestor after the ALLOW, a stored
+grant widened by direct database write, privilege synthesis across two roles,
+cross-subject and cross-tenant enumeration, a compromised-but-trusted signal
+issuer, ten concurrent executions against one grant, and three crash states. The
+registry is `test/adversarial-manifest.json`; a scenario declared there with no
+implementation fails the run.
+
+**`make recovery`** — three scenarios against a **real `SIGKILL`** of a real
+child process, killed after the execution claim commits and before the payment,
+and again after the payment and before settlement. A different process then
+retries against the same database. The provider's ledger is a separate committed
+table, because a `SIGKILL` takes memory with it.
 
 The security suite runs the attacks from the threat model against the real
 service: tenant breakout (including a direct-to-database probe as the

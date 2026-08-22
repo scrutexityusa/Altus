@@ -1,20 +1,26 @@
 # =============================================================================
-# Treasury wire authorization -- design partner starter pack.
+# Treasury wire authorization.
 # =============================================================================
 #
-# A ready-to-edit policy for a partner running outbound payments. Copy it,
-# change the values marked CHANGE ME, and put it through your own code review.
+# THE canonical treasury policy. One file, not two.
 #
-# This is NOT the reference tenant's policy. `policies/treasury_wire.yaml`
-# (underscore) is what `make demo`, the seed and the test suite use, and it is
-# tuned for that story. This file (hyphen) is the one to start from, and it is
-# validated by `packages/core/test/policy-pack.test.ts` -- so if you break it,
-# CI tells you which rule and why.
+# It is simultaneously the reference tenant's policy -- loaded by the seed, run
+# by `make demo`, and exercised by the test suite -- and the file a design
+# partner copies and edits. Those used to be separate files, and separate files
+# drift: two examples of "the treasury ladder" that disagree undermine the thing
+# the product is selling, which is that policy-as-code becomes part of your
+# system of record.
 #
-# Scrutexity is not the author of any customer's policy. These thresholds are a
-# defensible starting point, not regulatory advice. The platform executes the
-# semantics you define; deciding what they should be is your treasury team's
-# job and your auditor's concern.
+# Every value you are expected to change is marked CHANGE ME. Every rule
+# explains why it exists, so you can edit it without guessing at the intent.
+#
+# Scrutexity is not the author of any customer's policy (Section 33). These
+# thresholds are a defensible starting point, not regulatory advice. The
+# platform executes the semantics you define; deciding what they should be is
+# your treasury team's job and your auditor's concern.
+#
+# Behaviour is pinned by packages/core/test/policy-pack.test.ts -- move a
+# threshold and a named test tells you which boundary you changed.
 #
 # -----------------------------------------------------------------------------
 # Evaluation semantics you must understand before editing
@@ -23,82 +29,100 @@
 #   * The strictest matched decision wins:  DENY > ESCALATE > ALLOW.
 #   * Approval requirements from all matched escalations merge in the
 #     MORE-DEMANDING direction: max quorum, union of roles, shortest window.
-#     This is why the $1M rule does not need to repeat the $50k rule -- both
-#     match, and the stricter one governs.
+#     This is why the $1M rule does not repeat the $50k rule -- both match, and
+#     the stricter one governs.
 #   * A rule that matches nothing contributes nothing. If NO rule matches,
 #     `defaults.decision` applies, and that is DENY.
 #   * `priority` orders reporting and reason-code selection. It never
 #     short-circuits evaluation.
+#
+# -----------------------------------------------------------------------------
+# The tunables, in one place
+# -----------------------------------------------------------------------------
+# There is deliberately no `parameters:` block. Substituting values into a
+# policy document would be a templating layer in the policy language, and the
+# document that gets hashed onto every decision must be the document that was
+# reviewed -- not a template that rendered into it. So the tunables are listed
+# here for orientation and changed in place, where the diff a reviewer reads is
+# the change itself.
+#
+#   autonomous_limit        $50,000     rule wire_fifty_thousand_and_above
+#   leased_floor            $10,000     rule wire_ten_to_fifty_thousand
+#   dual_approval_limit     $1,000,000  rule wire_one_million_and_above
+#   approval_role           treasurer   every escalation
+#   second_approval_role    cfo         rule wire_one_million_and_above
+#   fraud_risk_threshold    0.9         rule elevated_fraud_risk
+#   decay_duration          600s        rule elevated_fraud_risk
+#   issuance_ceiling        $500,000    issuance.ceilings[treasury_admin]
+#   accounts, counterparties, sanctioned destinations -- marked inline
 # =============================================================================
 apiVersion: scrutexity.dev/policy/v1
-id: treasury_wire_starter
-version: 1.0.0
+id: treasury_wire
+version: 1.5.0
 
 metadata:
-  title: Treasury wire authorization (starter)
+  title: Treasury wire authorization
   description: >-
-    Tiered authorization for outbound payments: what an agent may do alone,
-    what needs one named human, what needs two, and what is refused outright.
-  owner: CHANGE ME -- your treasury operations team
-  tags: [treasury, payments, wire, starter]
+    Governs which outbound payment actions the treasury agents may take
+    autonomously, which require a named human, and which are refused outright.
+  # CHANGE ME -- your treasury operations team.
+  owner: Acme Corporation Treasury Operations
+  tags: [treasury, payments, wire]
 
-# -----------------------------------------------------------------------------
-# Defaults
-# -----------------------------------------------------------------------------
 defaults:
-  # WHY: nothing is permitted that a rule did not permit. A policy that forgot
-  # to say something refuses rather than allows. Do not change this.
+  # Nothing is permitted that a rule did not permit.
   decision: DENY
   reason_code: NO_RULE_MATCHED
-  # WHY: an ALLOW is a short-lived execution grant, not a standing permission.
-  # An agent that did not act promptly must come back, because the risk picture
-  # may have moved. Raise it only if your provider is genuinely slow; every
-  # second here is a second in which the facts behind the decision can go stale.
+  # An ALLOW is an execution grant, and it is short-lived: the agent must come
+  # back if it did not act promptly, because the risk picture may have moved.
   execution_grant_ttl_seconds: 300
 
 # -----------------------------------------------------------------------------
 # Failure modes -- fail-closed for anything financial
 # -----------------------------------------------------------------------------
 #
-# WHY ALL THREE ARE FAIL_CLOSED: the alternative is that a control-plane outage
-# becomes an authorization. If the policy cannot be read, the risk signals
-# cannot be read, or the enforcement plane is down, the honest answer is "I
-# cannot establish that this is authorised" -- and for money that means no.
+# WHY ALL THREE: the alternative is that a control-plane outage becomes an
+# authorization. If the policy cannot be read, the risk signals cannot be read,
+# or the enforcement plane is down, the honest answer is "I cannot establish
+# that this is authorised" -- and for money that means no.
 #
-# The cost is real and you should size it: a Postgres failover means payments
-# queue rather than proceed. That is the correct trade for outbound money. If
-# you have read-only actions that must survive an outage, put them in a
-# separate policy -- do not weaken this one.
+# Size the cost honestly: a Postgres failover means payments queue rather than
+# proceed. That is the correct trade for outbound money. If you have read-only
+# actions that must survive an outage, put them in a SEPARATE policy -- do not
+# weaken this one.
+#
+# `signal_unavailable` is the one people push back on, because signals are an
+# input to risk rather than to authority. Keep it closed anyway: without signals
+# you cannot tell a normal payment from one during an incident, and the whole
+# point of decay is that the risk picture is load-bearing.
 failure_modes:
   policy_unavailable: FAIL_CLOSED
   signal_unavailable: FAIL_CLOSED
   enforcement_unavailable: FAIL_CLOSED
 
-# -----------------------------------------------------------------------------
-# Issuable authority -- the ceiling on what may be GRANTED
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Issuable authority -- the top of the theorem.
+# =============================================================================
 #
-# WHY THIS EXISTS: containment guarantees a delegated grant never exceeds its
-# parent. But a root lease is issued from nothing and has no parent, so without
-# a ceiling here the whole chain hangs beneath an unbounded root -- anyone
-# holding the `leases:write` scope could mint any authority at all.
+# Containment guarantees a delegated grant never exceeds its parent. But a root
+# lease is issued from nothing and has no parent, so without a ceiling here the
+# whole chain hangs beneath an unbounded root: anyone holding the leases:write
+# scope could mint any authority at all.
 #
-# A scope protects an endpoint. This governs what may come out of it. Keeping
-# them separate is what stops one boolean sitting between an intern and a $10m
-# wire.
+# A scope protects an endpoint. This governs what may come out of it. They are
+# deliberately different things -- collapsing them is how a treasury system
+# ends up with one boolean between an intern and a $10m wire.
 #
-# A role not named here may issue NOTHING. That direction is deliberate: a
-# policy that forgot a role fails closed.
-#
-# Roles are NEVER unioned. A request must fit wholly inside ONE ceiling, so a
-# principal holding two narrow roles cannot combine them into a broad one.
+# A role not named here may issue nothing. That is the correct direction: a
+# policy that forgot to say fails closed.
 issuance:
   enforced: true
   ceilings:
     # CHANGE ME: your provisioning role, your accounts, your counterparties.
-    # Note the ceiling here ($500k) is well above what the rules below let an
-    # agent do alone ($50k). That is intentional -- this bounds what may be
-    # HELD, the rules bound what may be DONE with it.
+    #
+    # Note this ceiling ($500k) is well above what the rules below let an agent
+    # do alone ($50k). That is intentional -- this bounds what may be HELD, the
+    # rules bound what may be DONE with it.
     - role: treasury_admin
       grant:
         actions:
@@ -116,13 +140,16 @@ issuance:
           currencies: [USD]
           allowed_counterparties: [cp_100, cp_101]
 
-    # WHY A TREASURER CANNOT PROVISION A PAYING AGENT: a treasurer approves,
-    # they do not provision. Read-only authority is the most they may hand to a
-    # machine, so a compromised treasurer credential cannot mint an agent that
-    # pays. The $0 ceiling is not a placeholder -- it is the control.
+    # A treasurer approves; they do not provision. Read-only authority is the
+    # most they may hand to a machine, so a compromised treasurer credential
+    # cannot mint a paying agent. The $0.00 ceiling is the control, not a
+    # placeholder.
     - role: treasurer
       grant:
-        actions: [wire.read, counterparty.read, account.read]
+        actions:
+          - wire.read
+          - counterparty.read
+          - account.read
         resources:
           bank_account: [acct_001, acct_002]
           counterparty: [cp_100, cp_101]
@@ -131,23 +158,13 @@ issuance:
           currencies: [USD]
           allowed_counterparties: [cp_100, cp_101]
 
-# -----------------------------------------------------------------------------
-# Delegation defaults -- verification only, never financial execution
-# -----------------------------------------------------------------------------
-#
-# WHY: an agent that can sub-delegate is an agent that can build a chain you did
-# not design. Containment stops the chain from widening, but it does not stop a
-# money-moving action being handed to an agent nobody reviewed. So financial
-# actions are non-delegable at ANY scope, however narrowly asked for.
-#
-# The practical shape this produces: a treasury agent may hand a verification
-# agent the reads it needs to check a counterparty, and cannot hand it the
-# ability to pay one. Depth 2 means the chain is short enough to hold in your
-# head during an incident.
 delegation:
   enabled: true
   max_depth: 2
   max_ttl_seconds: 3600
+  # Money-moving authority is never delegable, however narrowly it is asked
+  # for. This is the rule that makes Scene 6 of the demo a denial rather than
+  # an argument about scope.
   non_delegable_actions:
     - wire.create
     - wire.modify
@@ -155,9 +172,9 @@ delegation:
     - wire.execute
 
 rules:
-  # ===========================================================================
-  # Read-only work
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Read-only work is unremarkable.
+  # ---------------------------------------------------------------------------
   - id: read_only_operations
     description: Verification and reconciliation reads carry no financial consequence.
     priority: 10
@@ -172,19 +189,13 @@ rules:
   # The amount ladder
   # ===========================================================================
   #
-  # Four tiers. Each is a separate rule so you can move one threshold without
+  # Four tiers, each a separate rule so you can move one threshold without
   # touching the others, and so a decision names exactly which tier it hit.
   #
-  # CHANGE ME: every threshold below. These are illustrative. Pick them from
-  # your existing approval matrix -- if your team already knows that $50k needs
-  # the treasurer, encode that, do not invent a new number here.
+  # CHANGE ME: every threshold below. Take them from your existing approval
+  # matrix -- if your team already knows that $50k needs the treasurer, encode
+  # that rather than inventing a new number here.
   # ---------------------------------------------------------------------------
-
-  # TIER 1  < $10,000  -> ALLOW, unattended
-  #
-  # WHY: routine low-value payments. The agent still needs a lease covering the
-  # action, the account and the counterparty -- "unattended" means no human in
-  # the loop, not unbounded.
   - id: wire_under_ten_thousand
     description: Routine low-value payments run unattended.
     priority: 20
@@ -196,13 +207,12 @@ rules:
       decision: ALLOW
       reason_code: BELOW_AUTONOMOUS_THRESHOLD
 
-  # TIER 2  $10,000 - $50,000  -> ALLOW, but the lease is doing the work
-  #
-  # WHY A SEPARATE TIER: the decision is the same as tier 1, but the reason code
-  # is not, and that difference is what an auditor reads. WITHIN_LEASED_AUTHORITY
-  # says: policy did not wave this through on size alone, the agent's own
-  # ceiling and counterparty list are what admitted it. If you tighten a lease,
-  # these are the payments that stop.
+  # WHY A SEPARATE TIER when the decision is the same as tier 1: the reason code
+  # is not, and that difference is what an auditor reads.
+  # BELOW_AUTONOMOUS_THRESHOLD says policy waved it through on size.
+  # WITHIN_LEASED_AUTHORITY says policy did not -- the agent's own ceiling and
+  # counterparty list are what admitted it. Tighten a lease and these are the
+  # payments that stop.
   - id: wire_ten_to_fifty_thousand
     description: >-
       Mid-value payments run unattended but only inside a scoped authority
@@ -217,15 +227,13 @@ rules:
       decision: ALLOW
       reason_code: WITHIN_LEASED_AUTHORITY
 
-  # TIER 3  $50,000 - $1,000,000  -> ESCALATE, one named human
-  #
   # WHY forbid_self_approval: the confused-deputy case. Without it, an agent
   # acting under a treasurer's delegated authority could satisfy its own
   # escalation. The approver must be a different principal from the requester.
   #
   # WHY ttl_seconds: an approval is not permanent. If the treasurer approves and
-  # nobody acts for an hour, the conditions may have changed -- and if they have,
-  # the execution boundary refuses with APPROVAL_CONTEXT_MISMATCH rather than
+  # nobody acts for an hour, conditions may have changed -- and if they have, the
+  # execution boundary refuses with APPROVAL_CONTEXT_MISMATCH rather than
   # proceeding on a stale yes.
   - id: wire_fifty_thousand_and_above
     description: Six-figure payments require the treasurer.
@@ -243,13 +251,10 @@ rules:
         forbid_self_approval: true
         ttl_seconds: 3600
 
-  # TIER 4  >= $1,000,000  -> DUAL APPROVAL
-  #
   # WHY THIS RULE DOES NOT REPEAT TIER 3: both rules match a $2m wire, and
   # approval requirements merge in the more-demanding direction -- max quorum,
   # union of roles. So a $2m payment needs quorum 2 across {treasurer, cfo}
-  # without this rule restating anything. Adding the tier-3 terms here would be
-  # redundant and would drift.
+  # without this rule restating anything. Repeating tier 3 here would drift.
   - id: wire_one_million_and_above
     description: Seven-figure payments require the treasurer and the CFO.
     priority: 40
@@ -266,20 +271,23 @@ rules:
         forbid_self_approval: true
         ttl_seconds: 7200
 
-  # ===========================================================================
-  # Counterparty controls
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Counterparty controls.
   #
-  # `context.counterparty_known` is DERIVED BY THE CONTROL PLANE from your own
-  # counterparty register. It is never read from the caller: an agent that could
-  # assert its counterparty is known would have defeated the control by
-  # asserting it.
-  #
+  # `context.counterparty_known` is derived by the control plane from the
+  # tenant's own counterparty register. It is never read from the caller: an
+  # agent that could assert its counterparty is known would have defeated the
+  # control by asserting it.
+  # ---------------------------------------------------------------------------
   # WHY DENY RATHER THAN ESCALATE: a new counterparty is the single highest
-  # signal of a compromised or confused agent, and it is also the one case where
-  # a tired human at 6pm will click approve. Onboarding a counterparty is a
-  # deliberate act that should happen in your vendor system, not in an approval
+  # signal of a compromised or confused agent, and it is also the one case a
+  # tired approver waves through at 6pm. Onboarding a counterparty should be a
+  # deliberate act in your vendor system, not a decision made in an approval
   # queue at the moment money is trying to move.
+  #
+  # If you genuinely need a break-glass path, add a SEPARATE narrowly-scoped
+  # rule with its own reason code and a quorum-2 approval. Keep this one strict
+  # and visible in the diff.
   - id: unknown_counterparty
     description: Money never moves to a counterparty the organization has not registered.
     priority: 50
@@ -291,7 +299,8 @@ rules:
       reason_code: UNKNOWN_COUNTERPARTY
 
   # CHANGE ME: your sanctions list, from your compliance team's source of truth.
-  # This is a coarse backstop, not a sanctions screening product.
+  # This is a coarse country backstop, not a sanctions screening product -- keep
+  # real screening upstream.
   - id: sanctioned_destination
     description: Destinations under comprehensive sanctions are refused outright.
     priority: 55
@@ -303,27 +312,30 @@ rules:
       decision: DENY
       reason_code: SANCTIONED_DESTINATION
 
-  # ===========================================================================
-  # High-risk signal -> reduce authority
-  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Signal-driven authority decay.
   #
-  # WHY authority_effect AND approval TOGETHER: the effect narrows what the
-  # agent may do UNSUPERVISED; the approval names who can supply the difference.
-  # Without the effect, a high-risk agent would keep its full autonomy. Without
-  # the approval, a legitimate payment during an elevated-risk window would be
-  # stuck with no route forward.
+  # The removal below narrows what the agent may do *unsupervised*; it does not
+  # redefine the agent's role. A wire that was inside its remit stays inside
+  # its remit -- it just stops being something the agent does alone.
   #
-  # WHAT THIS RULE CANNOT DO, BY CONSTRUCTION: it cannot widen anything. A
-  # signal can only subtract authority -- that is Law 2, checked at runtime, and
-  # asserted over randomised signal sets. Even a signal source you trust
-  # completely, holding a valid key, cannot turn a DENY into an ALLOW or raise a
-  # ceiling. Nor can a signal make an otherwise-refused request approvable: only
-  # decay, where the base grant covered the attempt, may be rescued by an
-  # approver this rule names. See G-19 in docs/security-surface-map.md.
+  # WHY AN EFFECT AND AN APPROVAL TOGETHER: the effect narrows what the agent
+  # may do alone; the approval names who can supply the difference. Without the
+  # effect a high-risk agent keeps full autonomy; without the approval a
+  # legitimate payment during an elevated-risk window has no route forward.
   #
-  # CHANGE ME: the threshold and the duration. 0.9 assumes your fraud engine
-  # emits calibrated 0-1 scores. If it emits something else, calibrate here, not
-  # in the engine.
+  # WHAT THIS CANNOT DO, BY CONSTRUCTION: it cannot widen anything. A signal
+  # only subtracts -- Law 2, checked at runtime and asserted over randomised
+  # signal sets. A source you trust completely, holding a valid key, cannot turn
+  # a DENY into an ALLOW or raise a ceiling. Nor can it make an otherwise-refused
+  # request approvable: only decay, where the base grant covered the attempt, may
+  # be rescued by an approver this rule names. See G-19 in
+  # docs/security-surface-map.md.
+  #
+  # CHANGE ME: the threshold and the duration. 0.9 assumes your engine emits
+  # calibrated 0-1 scores. If it emits something else, calibrate here -- the
+  # policy is the reviewed artifact, not the engine.
+  # ---------------------------------------------------------------------------
   - id: elevated_fraud_risk
     description: A live fraud signal above 0.9 suspends unattended payment authority.
     priority: 60
@@ -343,9 +355,9 @@ rules:
         remove_actions: [wire.create, wire.submit, wire.execute, wire.modify]
         duration_seconds: 600
 
-  # A risky counterparty pulls a human in regardless of amount. WHY no
-  # authority_effect here: the risk is attached to the counterparty, not to the
-  # agent, so narrowing the agent's authority would punish the wrong principal.
+  # WHY NO authority_effect HERE: the risk is attached to the counterparty, not
+  # to the agent, so narrowing the agent's authority would punish the wrong
+  # principal.
   - id: elevated_counterparty_risk
     description: A risky counterparty pulls a human into the loop regardless of amount.
     priority: 60
@@ -362,11 +374,9 @@ rules:
         forbid_self_approval: true
         ttl_seconds: 1800
 
-  # WHY AN AGENT'S SELF-REPORT IS ADMISSIBLE HERE: it can only ever make the
-  # outcome stricter. An agent that reports low confidence in its own reasoning
-  # does not get to move money on it. It cannot report HIGH confidence into more
-  # authority -- there is no rule that reads this signal in the widening
-  # direction, and the containment law would refuse one.
+  # WHY AN AGENT'S SELF-REPORT IS ADMISSIBLE: it can only ever make the outcome
+  # stricter. There is no rule reading this signal in the widening direction,
+  # and the containment law would refuse one.
   - id: low_model_confidence
     description: >-
       An agent that reports low confidence in its own reasoning does not get to

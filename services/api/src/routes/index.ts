@@ -10,7 +10,15 @@ import {
   verifyReceipt,
 } from '@scrutexity/core';
 import type { FastifyInstance } from 'fastify';
-import { SCOPES, requireHuman, requireNonAgent, requireScope, type Principal } from '../auth.js';
+import {
+  KNOWN_SCOPES,
+  SCOPES,
+  issueToken,
+  requireHuman,
+  requireNonAgent,
+  requireScope,
+  type Principal,
+} from '../auth.js';
 import { claimIdempotencyKey, completeIdempotencyKey } from '../idempotency.js';
 import type { Database, PoolClient } from '../db/pool.js';
 import { securityNow } from '../db/security-clock.js';
@@ -25,6 +33,11 @@ import { recordExecution } from '../services/execution.js';
 import {
   AuthorizationRequestSchema,
   CreateAgentSchema,
+  CreateResourceSchema,
+  CreateUserSchema,
+  IssueCredentialSchema,
+  UpdateResourceSchema,
+  UpdateUserSchema,
   CreateDelegationSchema,
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
@@ -193,6 +206,323 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   // ==========================================================================
   // Agents
   // ==========================================================================
+
+  // ==========================================================================
+  // Users
+  // ==========================================================================
+  //
+  // The humans. Created by an administrator through the API, which is what
+  // makes a tenant the partner's own rather than the seed script's.
+  //
+  // Deliberately not an identity system. No password, no session, no
+  // invitation, no directory sync: Scrutexity authenticates credentials, not
+  // people, and a user row exists so that an approval can name who gave it and
+  // a policy's approval roles have something to match against.
+
+  app.post('/v1/users', async (request, reply) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    // A machine must not be able to create the humans who approve its work.
+    // Without this an agent holding admin:write could mint a "treasurer" and
+    // then satisfy its own escalation -- the confused deputy, one step earlier
+    // than the approval check that looks for it.
+    requireHuman(request.principal);
+    const body = CreateUserSchema.parse(request.body);
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/users',
+      async (client) => {
+        try {
+          const result = await client.query(
+            `INSERT INTO scrutexity.users (id, organization_id, email, display_name, roles)
+             VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+            [
+              newId('user'),
+              request.principal.organization_id,
+              body.email.toLowerCase(),
+              body.display_name,
+              body.roles,
+            ],
+          );
+          return { status: 201, body: { user: serializeUser(result.rows[0]!) } };
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError(
+              'STATE_CONFLICT',
+              `a user with email "${body.email}" already exists in this organization`,
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    reply.code(status).send(payload);
+  });
+
+  app.get('/v1/users', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM scrutexity.users ORDER BY created_at ASC LIMIT 500',
+      );
+      return { users: result.rows.map(serializeUser) };
+    });
+  });
+
+  app.get<{ Params: { id: string } }>('/v1/users/:id', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query('SELECT * FROM scrutexity.users WHERE id = $1', [
+        request.params.id,
+      ]);
+      if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'user not found');
+      return { user: serializeUser(result.rows[0]!) };
+    });
+  });
+
+  /**
+   * Change a user's roles or disable them.
+   *
+   * Disabling is the terminal state rather than deletion: a user who approved
+   * a payment must remain nameable forever, and an approval whose approver
+   * cannot be named is not evidence of anything. Removing a role takes effect
+   * on the next decision, because approval requirements are evaluated against
+   * the roles held at approval time, not at policy authoring time.
+   */
+  app.patch<{ Params: { id: string } }>('/v1/users/:id', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    requireHuman(request.principal);
+    const body = UpdateUserSchema.parse(request.body);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.users
+            SET display_name = COALESCE($2, display_name),
+                roles        = COALESCE($3, roles),
+                status       = COALESCE($4, status),
+                updated_at   = now()
+          WHERE id = $1
+        RETURNING *`,
+        [request.params.id, body.display_name ?? null, body.roles ?? null, body.status ?? null],
+      );
+      if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'user not found');
+      return { user: serializeUser(result.rows[0]!) };
+    });
+  });
+
+  // ==========================================================================
+  // Credentials
+  // ==========================================================================
+  //
+  // `api_credentials` is the one table the application role has no privileges
+  // on: authentication resolves the tenant, so credential lookup happens before
+  // a tenant is known and cannot be RLS-scoped like everything else. All three
+  // routes therefore go through narrow SECURITY DEFINER functions that check
+  // `current_org_id()` themselves -- see migration 0010.
+
+  app.post('/v1/credentials', async (request, reply) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    // Only a human provisions. An agent that could mint credentials could mint
+    // one with scopes it does not hold, which is privilege escalation with
+    // extra steps.
+    requireHuman(request.principal);
+    const body = IssueCredentialSchema.parse(request.body);
+
+    for (const scope of body.scopes) {
+      if (!KNOWN_SCOPES.has(scope)) {
+        throw new ScrutexityError('INVALID_REQUEST', `unknown scope "${scope}"`, {
+          disclose: true,
+          details: { known_scopes: [...KNOWN_SCOPES].sort() },
+        });
+      }
+    }
+
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/credentials', async (client) => {
+        // An agent may be named by handle, which is what an operator has in
+        // front of them; the credential stores the id.
+        const principalId =
+          body.principal_type === 'agent'
+            ? (((
+                await client.query(
+                  'SELECT id FROM scrutexity.agents WHERE handle = $1 OR id = $1',
+                  [body.principal_id],
+                )
+              ).rows[0]?.id as string | undefined) ?? body.principal_id)
+            : body.principal_id;
+
+        const { token, prefix, hash } = issueToken();
+        let result;
+        try {
+          result = await client.query(
+            `SELECT * FROM scrutexity.issue_credential($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              newId('credential'),
+              request.principal.organization_id,
+              body.principal_type,
+              principalId,
+              prefix,
+              hash,
+              body.scopes,
+              body.expires_in_seconds
+                ? new Date(Date.now() + body.expires_in_seconds * 1000)
+                : null,
+            ],
+          );
+        } catch (error) {
+          if ((error as { code?: string }).code === '23503') {
+            throw new ScrutexityError(
+              'INVALID_REQUEST',
+              `no ${body.principal_type} "${body.principal_id}" exists in this organization`,
+              { disclose: true },
+            );
+          }
+          throw error;
+        }
+
+        return {
+          status: 201,
+          body: {
+            credential: serializeCredential(result.rows[0]!),
+            // Returned exactly once. Scrutexity keeps a SHA-256 and a lookup
+            // prefix; there is no endpoint that can produce this value again,
+            // and no support process that can recover it.
+            token,
+            token_notice:
+              'This is the only time this token is shown. It cannot be recovered; issue a new credential and revoke this one if it is lost.',
+          },
+        };
+      }),
+    );
+    reply.code(status).send(payload);
+  });
+
+  app.get('/v1/credentials', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query('SELECT * FROM scrutexity.list_credentials()');
+      return { credentials: result.rows.map(serializeCredential) };
+    });
+  });
+
+  /**
+   * Revocation is immediate. `authenticate` reads `status` on every request and
+   * there is no credential cache, so the next call with this token is a 401 --
+   * no grace period to wait out, which is the only useful property during an
+   * incident.
+   */
+  app.post<{ Params: { id: string } }>('/v1/credentials/:id/revoke', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    requireHuman(request.principal);
+    return recordingRejections(request as never, () =>
+      db.withTenant(request.principal.organization_id, async (client) => {
+        const result = await client.query('SELECT * FROM scrutexity.revoke_credential($1)', [
+          request.params.id,
+        ]);
+        if (result.rowCount === 0) {
+          throw new ScrutexityError('NOT_FOUND', 'credential not found');
+        }
+        return { credential: serializeCredential(result.rows[0]!) };
+      }),
+    );
+  });
+
+  // ==========================================================================
+  // Resources
+  // ==========================================================================
+  //
+  // The accounts money can move from and the counterparties it can move to.
+  //
+  // This is the write path that makes a tenant real. `counterparty_known` is
+  // derived by the control plane from the EXISTENCE of a row here -- never from
+  // anything a caller asserts -- so until a counterparty is registered, every
+  // wire to it is refused with UNKNOWN_COUNTERPARTY. Before this route existed
+  // the only way to register one was the seed script, which meant a partner's
+  // real counterparties could not be represented at all.
+
+  app.post('/v1/resources', async (request, reply) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    // Registering a counterparty is what makes money movable to it. An agent
+    // that could do this could authorise its own destination, which is the
+    // whole control in a single call.
+    requireHuman(request.principal);
+    const body = CreateResourceSchema.parse(request.body);
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/resources',
+      async (client) => {
+        try {
+          const result = await client.query(
+            `INSERT INTO scrutexity.resources
+               (id, organization_id, resource_type, external_id, display_name, attributes)
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+            [
+              newId('resource'),
+              request.principal.organization_id,
+              body.resource_type,
+              body.external_id,
+              body.display_name,
+              JSON.stringify(body.attributes),
+            ],
+          );
+          return { status: 201, body: { resource: serializeResource(result.rows[0]!) } };
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError(
+              'STATE_CONFLICT',
+              `a ${body.resource_type} with id "${body.external_id}" is already registered`,
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    reply.code(status).send(payload);
+  });
+
+  app.get<{ Querystring: { resource_type?: string } }>('/v1/resources', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `SELECT * FROM scrutexity.resources
+          WHERE ($1::text IS NULL OR resource_type = $1)
+          ORDER BY resource_type, external_id
+          LIMIT 500`,
+        [request.query.resource_type ?? null],
+      );
+      return { resources: result.rows.map(serializeResource) };
+    });
+  });
+
+  /**
+   * Update the display name or the policy-readable attributes.
+   *
+   * Deliberately no delete. A counterparty that has been paid is referenced by
+   * decisions and receipts, and removing it would make an authorization refer
+   * to something that cannot be named. To stop paying one, change the attribute
+   * the policy reads -- the refusal is then a policy decision with a reason
+   * code, which is what an auditor needs to see.
+   */
+  app.patch<{ Params: { id: string } }>('/v1/resources/:id', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    requireHuman(request.principal);
+    const body = UpdateResourceSchema.parse(request.body);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.resources
+            SET display_name = COALESCE($2, display_name),
+                attributes   = COALESCE($3::jsonb, attributes),
+                updated_at   = now()
+          WHERE id = $1 OR external_id = $1
+        RETURNING *`,
+        [
+          request.params.id,
+          body.display_name ?? null,
+          body.attributes ? JSON.stringify(body.attributes) : null,
+        ],
+      );
+      if (result.rowCount === 0) throw new ScrutexityError('NOT_FOUND', 'resource not found');
+      return { resource: serializeResource(result.rows[0]!) };
+    });
+  });
 
   app.post('/v1/agents', async (request, reply) => {
     requireScope(request.principal, SCOPES.adminWrite);
@@ -1072,8 +1402,20 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 
         const nextStatus = rejected ? 'DRAFT' : approvals >= 2 ? 'APPROVED' : 'REVIEW';
         await client.query(
+          // Both casts are load-bearing. Without them PostgreSQL has to deduce
+          // one type for $2 from two incompatible uses -- the enum column it is
+          // assigned to, and the text literal it is compared against -- and
+          // fails the whole statement with 42P08.
+          //
+          // This route had never been executed: the seed writes policy reviews
+          // with direct SQL, so the API path that a design partner has to use
+          // to activate their first policy was documented, published in the
+          // OpenAPI contract, and dead. Found by walking the onboarding flow
+          // end to end rather than by a test of this route, which is the point
+          // of that walk.
           `UPDATE scrutexity.policy_versions
-            SET status = $2, approved_at = CASE WHEN $2 = 'APPROVED' THEN now() ELSE NULL END
+            SET status = $2::scrutexity.policy_version_status,
+                approved_at = CASE WHEN $2::text = 'APPROVED' THEN now() ELSE NULL END
           WHERE id = $1`,
           [row.id, nextStatus],
         );
@@ -1406,6 +1748,44 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function serializeResource(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    resource_type: row.resource_type,
+    external_id: row.external_id,
+    display_name: row.display_name,
+    attributes: row.attributes,
+    created_at: (row.created_at as Date).toISOString(),
+  };
+}
+
+/** Operational metadata only. No token, no hash -- see migration 0010. */
+function serializeCredential(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    token_prefix: row.token_prefix,
+    principal_type: row.principal_type,
+    principal_id: row.principal_id,
+    scopes: row.scopes,
+    status: row.status,
+    created_at: (row.created_at as Date).toISOString(),
+    last_used_at: row.last_used_at ? (row.last_used_at as Date).toISOString() : null,
+    expires_at: row.expires_at ? (row.expires_at as Date).toISOString() : null,
+    revoked_at: row.revoked_at ? (row.revoked_at as Date).toISOString() : null,
+  };
+}
+
+function serializeUser(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    email: row.email,
+    display_name: row.display_name,
+    roles: row.roles,
+    status: row.status,
+    created_at: (row.created_at as Date).toISOString(),
+  };
+}
 
 function serializeAgent(row: Record<string, unknown>) {
   return {

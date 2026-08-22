@@ -143,7 +143,7 @@ determinism, and "no ALLOW without covering authority".
 ```bash
 git clone <repo> && cd Altus
 make dev            # Postgres, migrations, seeded tenant
-make ci             # 554 tests, lint, build, demo, adversarial, recovery
+make ci             # 596 tests, lint, build, demo, adversarial, recovery
 make adversarial    # the 11 invariants alone
 make recovery       # the SIGKILL harness alone
 make demo           # the treasury story, asserted end to end

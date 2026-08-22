@@ -81,6 +81,19 @@ export async function authenticate(db: Database, header: string | undefined): Pr
   if (row.status !== 'ACTIVE') throw UNAUTHORIZED();
   if (row.expires_at && isExpired(row.expires_at, now)) throw UNAUTHORIZED();
 
+  // Only once every credential check above has passed. Recording a use for a
+  // credential whose secret did not verify would be untrue, and would leak that
+  // the prefix was real. Coarse (five-minute granularity) so this is not a row
+  // update in front of every request -- see migration 0010.
+  //
+  // Never allowed to fail a request: an operational convenience for "is this
+  // credential still in use" must not be able to refuse an authorization.
+  await db
+    .withoutTenant((client: PoolClient) =>
+      client.query('SELECT scrutexity.touch_credential($1)', [row.id]),
+    )
+    .catch(() => undefined);
+
   return {
     credential_id: row.id,
     organization_id: row.organization_id,
@@ -130,6 +143,13 @@ export const SCOPES = {
    */
   audit: 'audit:read',
 } as const;
+
+/**
+ * The closed set. Issuing a credential with a scope outside it would be a
+ * credential that grants nothing while looking like it grants something, and a
+ * typo in a provisioning call should fail loudly rather than quietly.
+ */
+export const KNOWN_SCOPES: ReadonlySet<string> = new Set(Object.values(SCOPES));
 
 export function requireScope(principal: Principal, scope: string): void {
   if (!principal.scopes.includes(scope)) {
