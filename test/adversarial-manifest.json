@@ -149,7 +149,8 @@
       "cases": ["retry refused", "provider not contacted", "grant still spent", "key preserved"],
       "test_target": "services/api/test/enforcement.test.ts",
       "invariant_ids": ["INV-006", "INV-010"],
-      "gap": "G-16"
+      "gap": "G-16",
+      "$comment": "The crash here is simulated by rewinding durable state to what a crash leaves behind, which is fast and proves the recovery logic is correct given that state. R1 and R2 in test/recovery-manifest.json prove a real SIGKILL against a real process actually produces it."
     },
     {
       "scenario_id": "A10",
@@ -167,7 +168,8 @@
       ],
       "test_target": "services/api/test/enforcement.test.ts",
       "invariant_ids": ["INV-006", "INV-010"],
-      "gap": "G-16"
+      "gap": "G-16",
+      "$comment": "The crash here is simulated by rewinding durable state to what a crash leaves behind, which is fast and proves the recovery logic is correct given that state. R1 and R2 in test/recovery-manifest.json prove a real SIGKILL against a real process actually produces it."
     },
     {
       "scenario_id": "A11",

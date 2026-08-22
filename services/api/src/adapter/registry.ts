@@ -1,6 +1,7 @@
 import type { Config } from '../config.js';
 import { ProviderRegistry } from './provider.js';
 import { SimulatedTreasuryProvider } from './simulated.js';
+import { CrashHarnessProvider, type CrashPoint } from './crash-harness.js';
 
 /**
  * Builds the provider registry for this deployment.
@@ -34,6 +35,25 @@ export function loadProviders(config: Config): ProviderRegistry {
             );
           }
           return new SimulatedTreasuryProvider();
+        case 'crash-harness':
+          // Blocks forever at a configured point so the recovery harness can
+          // kill this process mid-payment. Refused in production for the same
+          // reason as the simulated provider, and more urgently: a provider
+          // that never answers would hold every execution open until the
+          // boundary's deadline and then record UNKNOWN.
+          if (config.isProduction) {
+            throw new Error(
+              'the crash-harness provider must not be enabled in production; ' +
+                'it deliberately never answers',
+            );
+          }
+          if (!config.CRASH_HARNESS_URL) {
+            throw new Error('CRASH_HARNESS_URL is required when the crash-harness provider is on');
+          }
+          return new CrashHarnessProvider(
+            config.CRASH_HARNESS_URL,
+            config.CRASH_HARNESS_POINT as CrashPoint,
+          );
         default:
           throw new Error(`unknown execution provider "${name}"`);
       }

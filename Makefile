@@ -86,6 +86,16 @@ adversarial: build ## Run the adversarial conformance suite (11 security invaria
 	# evidence was produced. Exits non-zero if any invariant fails.
 	pnpm exec tsx scripts/adversarial.ts
 
+.PHONY: recovery
+recovery: build ## Kill the API mid-payment and prove what survived
+	# Runs the API as a real child process and destroys it with SIGKILL at two
+	# instants: after the execution claim commits but before any money moves,
+	# and after the money moves but before settlement is recorded. A different
+	# process then retries against the same database. The adversarial suite's
+	# A9 and A10 assert the same invariants against rewound state; this proves
+	# a real crash produces that state. Exits non-zero if any invariant fails.
+	pnpm exec tsx scripts/recovery.ts
+
 .PHONY: test
 test: ## Run every test
 	pnpm exec vitest run
@@ -119,4 +129,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test build demo adversarial ## Everything CI runs
+ci: install lint test build demo adversarial recovery ## Everything CI runs

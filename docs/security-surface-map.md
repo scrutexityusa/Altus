@@ -232,6 +232,44 @@ Those are checks a design partner's infrastructure has to answer. Recording
 them as open is the difference between "we fixed it" and "we fixed the part we
 control".
 
+### G-16 — now proven against a real process death
+
+The adversarial suite's A9 and A10 establish that the recovery logic is correct
+_given_ the state a crash leaves behind. They construct that state by rewinding
+the database, which is fast and is the right shape for a test that runs on
+every commit — but it assumes the answer to the question it is asking. Nothing
+in it establishes that a real crash produces that state.
+
+`make recovery` establishes it. The API runs as a genuine child process and is
+destroyed with SIGKILL — no signal handler, no drain, no opportunity to write
+anything — at two instants, and a **different** process is then started against
+the same database and asked to do the work again.
+
+The provider's external system is a table in its own schema, on its own
+connection, committed as it goes, exactly as a bank's ledger is. That is the
+mechanism, not a convenience: a SIGKILL takes every in-memory record with it,
+so the only way to know what the outside world saw is to read something that
+outlived the process.
+
+| Scenario | Killed                               | Money moved | Retry                    |
+| -------- | ------------------------------------ | ----------- | ------------------------ |
+| R1       | after the claim, before the payment  | nothing     | 409 EXECUTION_UNRESOLVED |
+| R2       | after the payment, before settlement | $25,000     | 409 EXECUTION_UNRESOLVED |
+| R3       | not killed (control)                 | $25,000     | 200 replayed             |
+
+R1 and R2 are indistinguishable to Scrutexity, and that is the point: a system
+that could tell them apart from its own records would not need reconciliation.
+R3 is the control — a settled claim replays rather than refusing, so the 409s
+are the crash state speaking and not a blanket refusal to retry.
+
+The grants are single-use, so "the grant is still spent" is an assertion about
+durable state rather than about the claim row alone: it proves the consumption
+committed in the same transaction as the claim, which is the pair that has to
+be atomic for authority not to become spendable again when a process dies.
+
+Falsified rather than assumed: disabling the unresolved refusal makes R1 and R2
+fail and R3 still pass.
+
 ### G-5, expanded — **closed**, with one thing still not established
 
 Three separate defects sat under one gap number, and only the third was the one

@@ -49,6 +49,16 @@ const ConfigSchema = z.object({
    *
    * Production cannot select `permissive`; `loadConfig` refuses to start.
    */
+  /**
+   * Connection string and stopping point for the crash-harness provider.
+   *
+   * Only read when EXECUTION_PROVIDERS names it, which production refuses. The
+   * separate connection string is the point: the harness provider's ledger has
+   * to be writable by something other than the tenant-scoped application role,
+   * and it has to survive the process being killed.
+   */
+  CRASH_HARNESS_URL: z.string().default(''),
+  CRASH_HARNESS_POINT: z.enum(['before_payment', 'after_payment', 'none']).default('none'),
   SIGNAL_AUTHENTICATION: z.enum(['required', 'permissive']).default('required'),
   /**
    * Whether HMAC-SHA256 signal keys are usable at all.

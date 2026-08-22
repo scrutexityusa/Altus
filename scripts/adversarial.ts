@@ -26,6 +26,7 @@ import { buildApp } from '../services/api/src/app.js';
 import { newId, signSignalHmac } from '@scrutexity/core';
 import { seed, type SeedResult } from './seed.js';
 import { signedSignal } from './signal-source.js';
+import { bold, dim, green, red } from './console.js';
 import {
   ProviderRegistry,
   type ExecutionProvider,
@@ -40,14 +41,6 @@ const ADMIN_URL =
   'postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity';
 const APP_URL =
   process.env['DATABASE_URL'] ?? 'postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity';
-
-const ESC = String.fromCharCode(27);
-const noColor = process.env['NO_COLOR'] !== undefined;
-const paint = (code: string, text: string) => (noColor ? text : `${ESC}[${code}m${text}${ESC}[0m`);
-const bold = (t: string) => paint('1', t);
-const green = (t: string) => paint('32', t);
-const red = (t: string) => paint('31', t);
-const dim = (t: string) => paint('2', t);
 
 // ---------------------------------------------------------------------------
 // The recording provider
