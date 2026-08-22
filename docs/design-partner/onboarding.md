@@ -3,9 +3,13 @@
 **Time: about 30 minutes. No source edits, no database client, no fixture
 credentials.**
 
-Every command below is copy-pasteable and was run against a live server before
-being written down. When you finish, the organization, the people, the accounts
-and the counterparties are yours — the word "Acme" appears nowhere.
+Every block below is copy-pasteable **in sequence**. Each one exports what the
+next one needs, so nothing has to be reconstructed from earlier output. When you
+finish, the organization, the people, the accounts and the counterparties are
+yours — the word "Acme" appears nowhere.
+
+Work in **one terminal** for the setup and a **second** for the running API. The
+blocks say which.
 
 ---
 
@@ -39,37 +43,66 @@ does the assignment.
 
 ## 1. Start the database and apply the schema
 
-```bash
-git clone <repo> && cd Altus
-pnpm install
+**Terminal 1.** The repository URL is in your onboarding packet.
 
-docker compose up -d          # PostgreSQL 16 on 127.0.0.1:5432
-pnpm altus migrate
+```bash
+git clone <repo-url> altus && cd altus
+pnpm install
 ```
 
-**Pointing at a PostgreSQL you already run.** Every command takes its
-connection from the environment, and the defaults assume the compose database.
-For anything else, set both — the owner connection applies migrations, the
-application connection is what the service runs as and is subject to row level
-security:
+### If you are using the bundled Docker Compose
+
+```bash
+docker compose up -d
+
+# PostgreSQL accepts connections a moment after the container starts.
+until docker compose exec -T postgres pg_isready -U scrutexity_owner -q; do sleep 1; done
+
+export DATABASE_ADMIN_URL=postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity
+export DATABASE_URL=postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity
+```
+
+**Both roles already exist** — compose runs `db/init/00-roles.sql` on first
+start. There is nothing for you to create.
+
+### If you are using a PostgreSQL 16 you already run
+
+Create the two roles from `db/init/00-roles.sql`, then:
 
 ```bash
 export DATABASE_ADMIN_URL=postgres://owner:pass@your-host:5432/your-db
 export DATABASE_URL=postgres://app:pass@your-host:5432/your-db
 ```
 
-The application role must **not** be the table owner. RLS is FORCEd and the
-owner bypasses it, so tenant isolation depends on the service connecting as
-someone else. `db/init/00-roles.sql` creates both roles.
+**Why two roles:** row level security is `FORCE`d, and a table owner bypasses
+it. Tenant isolation depends on the service connecting as someone who is _not_
+the owner. The owner connection applies migrations; the application connection
+is what the service runs as.
+
+### Apply the schema
+
+```bash
+pnpm altus migrate
+```
+
+The first `altus` command compiles the workspace packages if they are not built
+yet. That takes a few seconds and happens once.
+
+---
 
 ## 2. The installation ceremony
 
+**Terminal 1.**
+
 ```bash
-ALTUS_BOOTSTRAP_DATABASE_URL=postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity \
+ALTUS_BOOTSTRAP_DATABASE_URL="$DATABASE_ADMIN_URL" \
   pnpm altus bootstrap \
-    --org-name  "Example Treasury" \
+    --org-name    "Example Treasury" \
     --admin-name  "Jane Smith" \
-    --admin-email "jane@example.com"
+    --admin-email "jane@example.com" \
+    --json > bootstrap.json
+
+cat bootstrap.json
 ```
 
 This creates your organization, your first administrator, and one credential.
@@ -77,60 +110,114 @@ It is the **only** step that uses the database owner connection, it runs once,
 and it refuses to run again — the installation is marked in a table whose
 primary key permits exactly one row.
 
-The token is printed once and cannot be recovered. Save it:
+Capture both values it produced. **The token is printed once and cannot be
+recovered**, which is why this writes it to a file rather than asking you to
+copy it out of a terminal:
 
 ```bash
-export ALTUS=http://127.0.0.1:8080
-export BOOTSTRAP=scr_...          # from the output above
+export BOOTSTRAP=$(jq -r .token bootstrap.json)
+export ADMIN_USER_ID=$(jq -r .admin_user_id bootstrap.json)
+export BOOTSTRAP_CRED_ID=$(jq -r .credential_id bootstrap.json)
+echo "administrator: $ADMIN_USER_ID"
 ```
 
-Start the API in another terminal:
+Capture the credential id too. The working credential you issue in step 3 has
+the same scopes, so once both exist the listing cannot tell you which is which —
+and you are going to want to revoke exactly one of them at the end.
 
-```bash
-pnpm altus migrate && pnpm exec tsx services/api/src/server.ts
-```
+> `bootstrap.json` holds a live credential. Delete it once step 3 has issued you
+> a working one: `rm bootstrap.json`.
 
 **What this credential can and cannot do.** It provisions: `admin:write`,
-`leases:write`, `policies:write`, `read`, `audit:read`. It deliberately cannot
+`leases:write`, `policies:write`, `read`, `audit:read`. It deliberately **cannot**
 evaluate authorizations, approve payments, or ingest signals. The ceremony
 establishes ownership and administration; it does not become the thing used for
 governed actions.
 
-## 3. Give the administrator the role that can issue authority
+### Start the API
+
+**Terminal 2**, from the same directory. It needs `DATABASE_URL`, so export it
+here too:
 
 ```bash
-# Your own user id is in the bootstrap output.
-curl -sS -X PATCH $ALTUS/v1/users/user_... \
-  -H "authorization: Bearer $BOOTSTRAP" -H 'content-type: application/json' \
-  -d '{"roles":["admin","policy_author","treasury_admin"]}' | jq
+export DATABASE_URL=postgres://scrutexity_app:scrutexity@127.0.0.1:5432/scrutexity
+pnpm exec tsx services/api/src/server.ts
 ```
 
-Then issue yourself a working credential and stop using the bootstrap one:
+It listens on **8080** by default; set `PORT` to change it. Back in
+**terminal 1**:
+
+```bash
+export ALTUS=http://127.0.0.1:8080
+curl -sS $ALTUS/ready          # {"status":"ready"}
+```
+
+---
+
+## 3. Give the administrator the role that can issue authority
+
+**Terminal 1**, for the rest of this guide.
+
+```bash
+curl -sS -X PATCH $ALTUS/v1/users/$ADMIN_USER_ID \
+  -H "authorization: Bearer $BOOTSTRAP" -H 'content-type: application/json' \
+  -d '{"roles":["admin","policy_author","treasury_admin"]}' | jq -c '.user.roles'
+```
+
+Then issue yourself a working credential:
 
 ```bash
 export ADMIN=$(curl -sS -X POST $ALTUS/v1/credentials \
   -H "authorization: Bearer $BOOTSTRAP" -H 'content-type: application/json' \
-  -d '{"principal_type":"user","principal_id":"user_...",
-       "scopes":["read","audit:read","admin:write","leases:write","policies:write"]}' \
+  -d "{\"principal_type\":\"user\",\"principal_id\":\"$ADMIN_USER_ID\",
+       \"scopes\":[\"read\",\"audit:read\",\"admin:write\",\"leases:write\",\"policies:write\"]}" \
   | jq -r .token)
+
+rm bootstrap.json
 ```
+
+**Why replace a credential that has almost the same scopes?** Because of where
+it came from, not what it can do. The bootstrap token was minted by a process
+holding the database owner connection, outside the API, with no record of who
+asked for it. Every credential after it is issued _through_ the control plane,
+by a named principal, and appears in `GET /v1/credentials` with a prefix,
+scopes, and a last-used time. Keeping the ceremony token in daily use would
+leave one credential in your estate that the estate cannot account for.
+
+Revoking it is the last step of onboarding — see the end of this page.
+
+---
 
 ## 4. Create the two reviewers
 
+A policy needs two approvals from humans who did not author it, and you are the
+author.
+
 ```bash
-for N in one two; do
-  UID=$(curl -sS -X POST $ALTUS/v1/users \
+create_human() {   # email  display-name  role  scopes-json  →  prints a token
+  local uid
+  uid=$(curl -sS -X POST $ALTUS/v1/users \
     -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
-    -d "{\"email\":\"reviewer.$N@example.com\",\"display_name\":\"Reviewer $N\",
-         \"roles\":[\"policy_reviewer\"]}" | jq -r .user.id)
+    -d "{\"email\":\"$1\",\"display_name\":\"$2\",\"roles\":[\"$3\"]}" \
+    | jq -er .user.id) || { echo "creating $1 failed" >&2; return 1; }
   curl -sS -X POST $ALTUS/v1/credentials \
     -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
-    -d "{\"principal_type\":\"user\",\"principal_id\":\"$UID\",
-         \"scopes\":[\"read\",\"policies:write\"]}" | jq -r '.token'
-done
+    -d "{\"principal_type\":\"user\",\"principal_id\":\"$uid\",\"scopes\":$4}" \
+    | jq -er .token
+}
+
+export REVIEWER_ONE=$(create_human reviewer.one@example.com "Reviewer One" \
+  policy_reviewer '["read","policies:write"]')
+export REVIEWER_TWO=$(create_human reviewer.two@example.com "Reviewer Two" \
+  policy_reviewer '["read","policies:write"]')
+
+test -n "$REVIEWER_ONE" -a -n "$REVIEWER_TWO" && echo "two reviewers ready"
 ```
 
-Save both tokens as `$REVIEWER_ONE` and `$REVIEWER_TWO`. Each is shown once.
+Each credential's secret is returned exactly once. There is no endpoint that can
+produce it again.
+
+---
 
 ## 5. Register your accounts and counterparties
 
@@ -156,55 +243,88 @@ curl -sS -X POST $ALTUS/v1/resources \
 
 An agent cannot do this. If it could, it could authorise its own destination.
 
+**Keep `acct_001` and `cp_100` for this walkthrough** even though the names are
+placeholders — the starter policy's issuance ceilings name exactly those ids, and
+changing one without the other is the most common way to get stuck. Step 6
+explains how to move to your real ids.
+
+---
+
 ## 6. Author, review and activate your policy
 
-Copy `policies/treasury-wire.yaml`, change the values marked `CHANGE ME` — your
-thresholds, your accounts, your counterparties, your approval roles — and put it
-through your own code review first. Then:
+The starter pack is `policies/treasury-wire.yaml`. It carries **six `CHANGE ME`
+markers**; for this walkthrough you need **none of them** — it works as shipped
+against `acct_001` and `cp_100`.
+
+**For your own ids, two of the six are mandatory** and the rest are judgement:
+
+| Marker                                          | Needed for the walkthrough?               | What it is                                                             |
+| ----------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------- |
+| `issuance.ceilings` accounts and counterparties | **Yes, if you changed the ids in step 5** | A lease naming anything outside these is refused _before_ it is issued |
+| Amount thresholds                               | No — defaults are $10k / $50k / $1M       | Your approval ladder                                                   |
+| `metadata.owner`                                | No                                        | Your team's name                                                       |
+| Sanctions list                                  | No                                        | A coarse country backstop                                              |
+| Fraud threshold and decay duration              | No                                        | Your engine's calibration                                              |
+| The header note on evaluation semantics         | No                                        | Explanatory                                                            |
+
+The approval roles the policy names (`treasurer`, `cfo`) do **not** need to
+match the two reviewers you created in step 4 — reviewers approve the _policy_,
+those roles approve _payments_. Two different things.
 
 ```bash
-VERSION=$(curl -sS -X POST $ALTUS/v1/policy-versions \
-  -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
-  -d "$(jq -Rs '{document: .}' < policies/treasury-wire.yaml)" \
-  | jq -r .policy_version.id)
+export POLICY_FILE=policies/treasury-wire.yaml
+# Edit $POLICY_FILE in place, or point this at your own copy. The command below
+# uploads whatever this variable names — a copy you edited under a different
+# filename will not be picked up unless you set it here.
 
-# Two approvals, from the two reviewers. Not from the author.
-for T in $REVIEWER_ONE $REVIEWER_TWO; do
+export VERSION=$(curl -sS -X POST $ALTUS/v1/policy-versions \
+  -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d "$(jq -Rs '{document: .}' < "$POLICY_FILE")" | jq -er .policy_version.id)
+echo "draft: $VERSION"
+```
+
+Two approvals, from the two reviewers. Not from you:
+
+```bash
+for T in "$REVIEWER_ONE" "$REVIEWER_TWO"; do
   curl -sS -X POST $ALTUS/v1/policy-versions/$VERSION/reviews \
     -H "authorization: Bearer $T" -H 'content-type: application/json' \
-    -d '{"vote":"APPROVED","comment":"Matches our approval matrix."}' | jq -c
+    -d '{"vote":"APPROVED","comment":"Matches our approval matrix."}' \
+  | jq -e '{status,approvals}' || { echo "review failed — stopping" >&2; break; }
 done
 
 curl -sS -X POST $ALTUS/v1/policy-versions/$VERSION/activate \
-  -H "authorization: Bearer $ADMIN" | jq -c .policy_version
+  -H "authorization: Bearer $ADMIN" | jq -c '.policy_version | {status}'
 ```
 
-The first review moves the version to `REVIEW`; the second moves it to
-`APPROVED`. Only then can it be activated. If you try to review your own
-version you get a `403`, which is the control working.
+The first review moves the version to `REVIEW`; the second to `APPROVED`. Only
+then can it be activated. Reviewing your own version returns `403`, which is the
+control working.
 
-**Your issuance ceilings must name your roles and your resources.** The starter
-pack's ceilings list `treasury_admin` with example accounts and counterparties.
-A lease that mentions anything outside them is refused with
-`DELEGATION_EXCEEDS_PARENT` _before_ it is issued — so edit the ceilings in the
-same pass as the thresholds.
+---
 
 ## 7. Register your agent and give it a credential
 
 ```bash
 curl -sS -X POST $ALTUS/v1/agents \
   -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
-  -d '{"handle":"payments-agent","display_name":"Payments Agent",
-       "owner_user_id":"user_..."}' | jq -c .agent
+  -d "{\"handle\":\"payments-agent\",\"display_name\":\"Payments Agent\",
+       \"owner_user_id\":\"$ADMIN_USER_ID\"}" | jq -c '.agent | {id,handle}'
 
 export AGENT=$(curl -sS -X POST $ALTUS/v1/credentials \
   -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
   -d '{"principal_type":"agent","principal_id":"payments-agent",
-       "scopes":["read","authorization:evaluate"]}' | jq -r .token)
+       "scopes":["read","authorization:evaluate"]}' | jq -er .token)
 ```
 
-Every agent has a named human owner. When you later ask who authorised
-something, that is where the answer starts.
+`owner_user_id` is the accountable human — here, yourself. Every agent has one;
+when you later ask who authorised something, that is where the answer starts.
+
+**Handles work anywhere an agent id does.** `principal_id`, `agent_id` in a
+lease, and `agent_id` in an authorization request all accept either
+`payments-agent` or `agent_01...`. Use whichever you have in front of you.
+
+---
 
 ## 8. Issue authority
 
@@ -220,11 +340,13 @@ curl -sS -X POST $ALTUS/v1/authority-leases \
            "currencies":["USD"],
            "allowed_counterparties":["cp_100"]}},
        "ttl_seconds":3600,
-       "grant_type":"SINGLE_USE"}' | jq -c .authority_lease
+       "grant_type":"SINGLE_USE"}' | jq -c '.authority_lease.id // .error'
 ```
 
 `"5000000"` is $50,000.00 — money is integer minor units as a string, and floats
-are refused.
+are refused. `SINGLE_USE` means the grant is spent on the first claim.
+
+---
 
 ## 9. One governed execution
 
@@ -236,27 +358,59 @@ DECISION=$(curl -sS -X POST $ALTUS/v1/authorization/evaluate \
        "context":{"amount":"25000.00","currency":"USD",
                   "counterparty_id":"cp_100","destination_country":"US"},
        "nonce":"first-real-request"}')
-echo "$DECISION" | jq -c '{decision,reason_code}'
 
-curl -sS -X POST $ALTUS/v1/execute \
+export DECISION_ID=$(echo "$DECISION" | jq -er .decision_id)
+echo "$DECISION" | jq -c '{decision,reason_code}'
+```
+
+Then execute it. The operation must be **the one that was authorized** — the
+boundary recomputes it from its own records and compares hashes, so a changed
+amount produces `INTENT_MISMATCH` and the provider is never contacted:
+
+```bash
+EXECUTION=$(curl -sS -X POST $ALTUS/v1/execute \
   -H "authorization: Bearer $AGENT" -H 'content-type: application/json' \
-  -d "{\"decision_id\":\"$(echo "$DECISION" | jq -r .decision_id)\",
+  -d "{\"decision_id\":\"$DECISION_ID\",
        \"operation\":{\"action\":\"wire.execute\",
          \"resource\":{\"type\":\"bank_account\",\"id\":\"acct_001\"},
          \"context\":{\"amount\":\"25000.00\",\"currency\":\"USD\",
-                      \"counterparty_id\":\"cp_100\",\"destination_country\":\"US\"}}}" \
-  | jq -c '{status,provider,intent_verified}'
+                      \"counterparty_id\":\"cp_100\",\"destination_country\":\"US\"}}}")
+
+export RECEIPT_ID=$(echo "$EXECUTION" | jq -er .receipt_id)
+echo "$EXECUTION" | jq -c '{status,provider,intent_verified}'
 ```
+
+---
 
 ## 10. Verify the evidence
 
 ```bash
-curl -sS -X POST $ALTUS/v1/receipts/rcpt_.../verify \
+curl -sS -X POST $ALTUS/v1/receipts/$RECEIPT_ID/verify \
   -H "authorization: Bearer $ADMIN" | jq -c '{integrity,attests}'
 
-curl -sS $ALTUS/v1/trace/dec_... -H "authorization: Bearer $ADMIN" \
+curl -sS $ALTUS/v1/trace/$DECISION_ID -H "authorization: Bearer $ADMIN" \
   | jq -c '{root_cause:.root_cause.name, steps:(.trace|length), complete}'
 ```
+
+`INTACT` means the receipt's payload digest, link hash and signature all verify
+and the chain reaches genesis. `complete: true` means the causal trace reaches
+the moment a human activated the policy that admitted this authority.
+
+---
+
+## 11. Retire the ceremony credential
+
+```bash
+curl -sS -X POST $ALTUS/v1/credentials/$BOOTSTRAP_CRED_ID/revoke \
+  -H "authorization: Bearer $ADMIN" | jq -c '.credential | {status,revoked_at}'
+
+# Everything that remains, and when each was last used.
+curl -sS $ALTUS/v1/credentials -H "authorization: Bearer $ADMIN" \
+  | jq -c '.credentials[] | {id,principal_type,scopes,status,last_used_at}'
+```
+
+Revocation is immediate — the next request with that token is a `401`. There is
+no credential cache to wait out.
 
 ---
 
@@ -311,6 +465,7 @@ fixture file:
 - [ ] One execution went through `POST /v1/execute` with `intent_verified: true`
 - [ ] Its receipt verifies `INTACT`
 - [ ] `GET /v1/trace/{decision_id}` returns `complete: true`
+- [ ] The bootstrap credential is `REVOKED`
 
 If any step required knowledge that is not on this page, that is a defect in
-this page. Tell us which one.
+this page. Tell us which one, and what you had to go and find out.

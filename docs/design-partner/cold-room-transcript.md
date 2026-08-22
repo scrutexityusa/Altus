@@ -21,32 +21,46 @@ was.
 
 ## Result
 
-**2 minutes 40 seconds**, clock started before the first command.
+Two runs. The second is the one that counts, because the guide was rewritten
+between them after an independent cold read of the document.
+
+### Run 2 — after the cold-read rewrite
+
+**42 seconds** for steps 1–11 in a single terminal session, pasted verbatim with
+no improvisation and no reconstruction of state from earlier output. (Dependency
+install was already warm in this clone; run 1 measured it at 2 seconds.)
 
 ```
-15:49:49  START
-15:49:51  pnpm install
-15:49:54  pnpm altus migrate                     10 migrations applied
-15:51:10  pnpm altus bootstrap                   organization + admin + credential
-15:51:36  api listening, /ready 200
-15:51:54  PATCH user roles; issue admin credential; create 2 reviewers
-15:52:10  register acct_001 + cp_100; policy REVIEW -> APPROVED -> ACTIVE
-15:52:29  lease issued; ALLOW; EXECUTED; receipt INTACT; trace complete
-15:52:29  STOP
+16:18:22  START
+16:18:22  pnpm altus migrate                     10 migrations applied
+16:18:2x  pnpm altus bootstrap                   organization + admin + credential
+16:18:38  api listening, /ready 200
+16:18:40  roles patched; admin credential issued; two reviewers created
+16:18:40  acct_001 + cp_100 registered; policy REVIEW -> APPROVED -> ACTIVE
+16:19:04  agent + credential; lease; ALLOW; EXECUTED; INTACT; trace complete
+16:19:04  STOP
 ```
 
-Verbatim output of the last four steps:
+Verbatim output of the last five steps:
 
 ```
---- step 8: issue authority
-"lease_01M0N2RV6WPQ0C2GVBZ2GE75YX"
---- step 9: governed execution
+{"id":"agent_01M0N49G5B4Z84AR3ZHB2K41EC","handle":"payments-agent"}
+"lease_01M0N49G6WRPB1Z5EK6BY1XSHF"
 {"decision":"ALLOW","reason_code":"WITHIN_LEASED_AUTHORITY"}
 {"status":"EXECUTED","provider":"simulated-treasury","intent_verified":true}
---- step 10: evidence
 {"integrity":"INTACT","attests":"evidence_integrity_and_provenance"}
 {"root_cause":"treasury_wire v1.5.0 activated","steps":6,"complete":true}
+{"status":"REVOKED","revoked_at":"2026-08-22T16:19:43.832Z"}
 ```
+
+Every credential in the final listing carried a non-null `last_used_at`, which
+is the field that was decorative until this milestone.
+
+### Run 1 — the first version of the guide
+
+**2 minutes 40 seconds**, and it found two defects (below). The guide was
+mechanically discontinuous in ways this run did not expose, because the person
+running it knew what the next step needed.
 
 ## Checklist
 
@@ -69,7 +83,7 @@ Verbatim output of the last four steps:
 | Copying a secret from a fixture   | Not needed                         |
 | Knowledge not in the instructions | **One gap, fixed** — see below     |
 
-### What the run found
+### What run 1 found
 
 **1. The documented flow was broken on a fresh clone.**
 
@@ -87,21 +101,41 @@ package; `bootstrap` does. So the second of three documented commands failed on
 every clean checkout, and nothing said to build first.
 
 Fixed in `scripts/altus.ts` rather than by adding a step: the dispatcher builds
-the workspace when `dist` is absent, once. A stranger following the guide should
-not have to know which subcommands happen to need compiled output.
+the workspace when `dist` is absent, once.
 
 **2. The guide assumed the compose database.**
 
-Every command reads its connection from the environment and the defaults point
-at `docker compose`. Running against an existing PostgreSQL required knowing to
-set `DATABASE_ADMIN_URL` and `DATABASE_URL`, which the guide did not mention.
-Now documented in step 1, along with the reason the application role must not be
-the table owner.
+Running against an existing PostgreSQL required knowing to set
+`DATABASE_ADMIN_URL` and `DATABASE_URL`, which the guide did not mention.
+
+### What the cold read found, between the runs
+
+Someone who had not written the code read the guide without opening the
+repository and reported six hesitations and three stop-and-ask points. Five were
+mechanical: the guide taught `DATABASE_ADMIN_URL` in step 1 and then hardcoded a
+different connection string in step 2; it never captured the administrator's user
+id, the reviewer tokens, the decision id or the receipt id, so later steps
+referenced values the reader no longer had; and it said "copy the policy file"
+beside a command that uploaded the original.
+
+The common shape: **the guide switched from automation to manual bookkeeping
+halfway through, and only someone who already knew what the next step needed
+could carry state across the gap.** Run 1 did not catch a single one of these,
+because the person running it was that someone.
+
+Every block now exports what the next block consumes.
+
+### What run 2 found
+
+One, introduced by the rewrite itself: the final step told the reader to revoke
+"the bootstrap credential" from a listing in which it is **indistinguishable
+from the working credential** — same principal, same scopes. Step 2 now captures
+`BOOTSTRAP_CRED_ID` alongside the token.
 
 ## What this does and does not establish
 
-**Does:** the documented path works end to end from nothing, and the two defects
-above are gone.
+**Does:** the documented path works end to end from nothing, verbatim, in a
+single session, and the defects above are gone.
 
 **Does not:** that a _stranger_ can do it. This run was performed by someone who
 wrote the system, which is exactly the bias the exercise exists to expose and
