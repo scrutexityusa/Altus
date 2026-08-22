@@ -100,6 +100,14 @@ export async function issueTreasuryLease(
   return response.body.authority_lease;
 }
 
+/**
+ * Signing a signal the way a real source would. Lives in scripts/ so the demo
+ * and the adversarial runner sign identically -- two implementations of "what
+ * bytes get signed" eventually disagree, and the disagreement looks exactly
+ * like a forged signal.
+ */
+export { signedSignal, type SignalRequest } from '../../../scripts/signal-source.js';
+
 export function wireRequest(overrides: Record<string, unknown> = {}) {
   return {
     agent_id: 'treasury-agent',

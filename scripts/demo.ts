@@ -13,6 +13,7 @@
 import { execSync } from 'node:child_process';
 import { buildApp } from '../services/api/src/app.js';
 import { seed, type SeedResult } from './seed.js';
+import { signedSignal } from './signal-source.js';
 
 const ADMIN_URL =
   process.env['DATABASE_ADMIN_URL'] ??
@@ -172,13 +173,13 @@ async function main(): Promise<void> {
     );
     outcome('DENY', `${replay.body.error.code} -- an ALLOW is a single-use grant`);
 
-    scene('A $250,000 wire -- beyond the agent discretion');
+    scene('A $75,000 wire -- beyond the agent discretion');
     const large = await call('POST', '/v1/authorization/evaluate', t['treasury_agent']!, {
       agent_id: 'treasury-agent',
       action: 'wire.execute',
       resource: { type: 'bank_account', id: 'acct_001' },
       context: {
-        amount: '250000.00',
+        amount: '75000.00',
         currency: 'USD',
         counterparty_id: 'cp_101',
         destination_country: 'CH',
@@ -298,15 +299,103 @@ async function main(): Promise<void> {
       process.stdout.write(`   ${dim('|')} ${line}\n`);
     }
 
-    scene('A fraud signal arrives');
-    const signal = await call('POST', '/v1/signals', t['fraud_engine']!, {
-      subject: { type: 'agent', id: fixtures.agents['treasury'] },
-      signal_type: 'fraud_risk',
-      value: '0.97',
-      confidence: '0.91',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
+    scene('Mutation after authorization -- the enforcement boundary');
+    step('the agent asks for a $25,000 wire to cp_100 and is allowed');
+    const boundContext = {
+      amount: '25000.00',
+      currency: 'USD',
+      counterparty_id: 'cp_100',
+      destination_country: 'US',
+    };
+    const bound = await call('POST', '/v1/authorization/evaluate', t['treasury_agent']!, {
+      agent_id: 'treasury-agent',
+      action: 'wire.execute',
+      resource: { type: 'bank_account', id: 'acct_001' },
+      context: boundContext,
+      nonce: `demo-bind-${Date.now()}`,
     });
+    expect(
+      bound.body.decision === 'ALLOW',
+      `expected ALLOW, got ${bound.body.decision} (${bound.body.reason_code})`,
+    );
+    outcome(bound.body.decision, `${bound.body.reason_code}`);
+    step(`authorized intent ${dim(bound.body.exact_intent_hash.slice(0, 16))}`);
+
+    step('the agent now presents a different amount to the execution boundary...');
+    const mutated = await call('POST', '/v1/execute', t['treasury_agent']!, {
+      decision_id: bound.body.decision_id,
+      operation: {
+        action: 'wire.execute',
+        resource: { type: 'bank_account', id: 'acct_001' },
+        // One field changed. Everything else is byte-identical to the
+        // authorized operation, including the decision id it is presented under.
+        context: { ...boundContext, amount: '75000.00' },
+      },
+    });
+    expect(
+      mutated.body.error?.code === 'INTENT_MISMATCH',
+      `expected INTENT_MISMATCH, got ${JSON.stringify(mutated.body)}`,
+    );
+    outcome(
+      'DENY',
+      `${mutated.body.error.code} -- mutated: ${mutated.body.error.details.mutated_fields.join(', ')}`,
+    );
+    step(red('the provider was never contacted; no money moved and none could have'));
+    step('the attempt is recorded as a security event, not discarded');
+
+    step('the agent presents the operation it was actually authorized for...');
+    const honest = await call('POST', '/v1/execute', t['treasury_agent']!, {
+      decision_id: bound.body.decision_id,
+      operation: {
+        action: 'wire.execute',
+        resource: { type: 'bank_account', id: 'acct_001' },
+        context: boundContext,
+      },
+    });
+    expect(honest.status === 201, `enforced execution failed: ${JSON.stringify(honest.body)}`);
+    outcome('ALLOW', `${honest.body.status} via ${honest.body.provider}`);
+    step(
+      `executed intent ${dim(honest.body.executed_intent_hash.slice(0, 16))} ` +
+        `${green('matches')} the authorized intent`,
+    );
+
+    scene('WHY? -- the causal trace');
+    const trace = await call('GET', `/v1/trace/${approval.body.decision.decision_id}`, t['admin']!);
+    expect(trace.status === 200, `trace failed: ${JSON.stringify(trace.body)}`);
+    step(
+      `root cause: ${bold(trace.body.root_cause.name)} ` +
+        `(${trace.body.root_cause.type}, ${trace.body.root_cause.timestamp})`,
+    );
+    for (const node of trace.body.trace) {
+      const link = node.causal_parent_id ? node.causal_link_type : 'origin';
+      process.stdout.write(
+        `   ${dim('|')} ${String(node.step).padStart(2)}. ${dim(link.padEnd(20))} ${node.name}\n`,
+      );
+    }
+    step(
+      trace.body.complete
+        ? `${green('complete')} -- the chain reaches a policy activation`
+        : `${yellow('incomplete')} -- the chain stops short of a policy activation`,
+    );
+
+    scene('A fraud signal arrives');
+    // Signed by the source, as every signal must be. The fraud engine enrolled
+    // an Ed25519 public key when the tenant was set up; Scrutexity has never
+    // held the private half, and a signal it cannot attribute to an enrolled
+    // source does not influence authority at all.
+    const signal = await call(
+      'POST',
+      '/v1/signals',
+      t['fraud_engine']!,
+      signedSignal(fixtures, {
+        subject: { type: 'agent', id: fixtures.agents['treasury']! },
+        signal_type: 'fraud_risk',
+        value: '0.97',
+        confidence: '0.91',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(signal.status === 201, `signal ingestion failed: ${JSON.stringify(signal.body)}`);
     step(
       `fraud_risk = ${red('0.97')} for treasury-agent, valid until ${signal.body.signal.expires_at}`,

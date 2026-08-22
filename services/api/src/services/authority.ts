@@ -3,12 +3,14 @@ import {
   ScrutexityError,
   addSeconds,
   authorizeDelegation,
+  authorizeIssuance,
   loadPolicyDocument,
   newId,
   normalizeGrant,
   type AuthorityGrant,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
@@ -22,7 +24,41 @@ export interface IssueLeaseInput {
   ttlSeconds: number;
   issuedByUserId?: string | null;
   revocable?: boolean;
+  grantType?: 'REUSABLE' | 'SINGLE_USE';
+  purpose?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * The principal asking to issue. Required: issuance is where authority
+   * enters the system, and it is the one place with no parent grant to be
+   * contained by, so the bound has to come from somewhere else.
+   */
+  issuer: { type: 'user' | 'agent' | 'service'; id: string };
+}
+
+/**
+ * The roles the issuing principal holds.
+ *
+ * Read from the database on every issuance rather than carried on the
+ * credential, so revoking someone's role takes effect on their next request
+ * instead of whenever their token happens to expire. Issuance is rare and
+ * consequential; one extra query is the right trade.
+ *
+ * A non-user principal holds no organisational role and therefore no issuance
+ * ceiling. That is deliberate: a service or an agent minting root authority is
+ * exactly the shape this control exists to prevent, and the empty list makes
+ * `authorizeIssuance` refuse it by the ordinary path rather than a special
+ * case.
+ */
+async function loadIssuerRoles(
+  client: PoolClient,
+  issuer: { type: 'user' | 'agent' | 'service'; id: string },
+): Promise<string[]> {
+  if (issuer.type !== 'user') return [];
+  const result = await client.query(
+    "SELECT roles FROM scrutexity.users WHERE id = $1 AND status = 'ACTIVE'",
+    [issuer.id],
+  );
+  return (result.rows[0]?.roles as string[] | undefined) ?? [];
 }
 
 export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: IssueLeaseInput) {
@@ -37,15 +73,57 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
   }
 
   const policyVersion = await activePolicyVersion(client, input.organizationId);
-  const now = new Date();
+
+  // -- The top of the theorem ----------------------------------------------
+  //
+  // Every other containment relation has a parent to be checked against. A
+  // root lease does not, so without this the whole chain hangs beneath an
+  // unbounded root: `leases:write` alone could mint any authority at all.
+  const issuerRoles = await loadIssuerRoles(client, input.issuer);
+  const issuance = authorizeIssuance(
+    { issuer_roles: issuerRoles, grant },
+    loadPolicyDocument(policyVersion.content).document,
+  );
+  if (!issuance.ok) {
+    throw new ScrutexityError('DELEGATION_EXCEEDS_PARENT', issuance.message, {
+      disclose: true,
+      reasonCode: issuance.reason_code,
+      // Axes only, matching what the delegation path discloses -- enough for
+      // an operator to correct the request, not enough to enumerate the
+      // ceiling by probing it.
+      details: {
+        violations: issuance.violations.map((v) => ({ axis: v.axis, dimension: v.dimension })),
+      },
+      internal: {
+        securityEvent: {
+          organizationId: input.organizationId,
+          kind: 'ISSUANCE_EXCEEDS_CEILING',
+          subjectId: input.issuer.id,
+          detail: {
+            reason_code: issuance.reason_code,
+            issuer_type: input.issuer.type,
+            issuer_roles: issuerRoles,
+            target_agent_id: input.agentId,
+            axes: issuance.violations.map((v) => `${v.axis}:${v.dimension}`),
+            policy_version_id: policyVersion.id,
+          },
+        },
+      },
+    });
+  }
+
+  // Authoritative: the lease's issued_at and expires_at are derived from this,
+  // so the row's own lifetime is measured on the same clock that will later
+  // judge it.
+  const now = await securityNow(client);
   const leaseId = newId('lease');
 
   const inserted = await client.query(
     `INSERT INTO scrutexity.authority_leases
        (id, organization_id, agent_id, policy_version_id, issued_by_user_id, actions,
         resources, constraints, status, revocable, parent_lease_id, depth,
-        issued_at, expires_at, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,NULL,0,$10,$11,$12)
+        issued_at, expires_at, metadata, grant_type, purpose)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,NULL,0,$10,$11,$12,$13,$14)
      RETURNING *`,
     [
       leaseId,
@@ -60,6 +138,8 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
       now,
       addSeconds(now, input.ttlSeconds),
       JSON.stringify(input.metadata ?? {}),
+      input.grantType ?? 'REUSABLE',
+      input.purpose ?? null,
     ],
   );
 
@@ -77,10 +157,12 @@ export async function issueLease(client: PoolClient, keys: EvidenceKeys, input: 
       expires_at: lease.expires_at,
       issued_by_user_id: input.issuedByUserId ?? null,
       depth: 0,
+      grant_type: input.grantType ?? 'REUSABLE',
+      purpose: input.purpose ?? null,
     },
   });
 
-  metrics.leasesIssued.inc({ depth: '0' });
+  metrics.leasesIssued.inc({ depth: '0', grant_type: input.grantType ?? 'REUSABLE' });
   return { lease, receipt_id: receipt.id };
 }
 
@@ -209,7 +291,14 @@ export async function createDelegation(
       requested_grant: requestedGrant,
       requested_ttl_seconds: input.ttlSeconds,
     },
-    { now: new Date(), parent_lease: parentLease, parent_chain: chain, policy: document },
+    {
+      // Delegation containment is a validity decision like any other: the
+      // parent chain must be live *now*, on the authoritative clock.
+      now: await securityNow(client),
+      parent_lease: parentLease,
+      parent_chain: chain,
+      policy: document,
+    },
   );
 
   if (!decision.ok) {

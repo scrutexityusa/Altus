@@ -1,4 +1,6 @@
 import { lookupAction } from './actions.js';
+import { computeDecisionContextHash } from './context.js';
+import { evaluateIntent, type IntentEvaluation } from './intent.js';
 import {
   coversAttempt,
   normalizeGrant,
@@ -68,6 +70,10 @@ export interface EvaluationRequest {
   id: string;
   organization_id: string;
   agent_id: string;
+  /** Canonical hash of the semantic request; folded into the context fingerprint. */
+  request_hash: string;
+  /** What the agent says it is doing. Bound against policy intents and lease purpose. */
+  declared_intent: string | null;
   action: string;
   resource: { type: string; id: string; attributes: Record<string, unknown> };
   /** Money values already normalised to exact Money records. */
@@ -144,6 +150,13 @@ export interface AuthorizationEvaluation {
   constraints_evaluated: ConstraintCheck[];
   approval_requirement: ApprovalRequirement | null;
   approval_state: ApprovalEvaluation | null;
+  /** Structured verdict on declared intent vs attempted action. Never prose. */
+  intent_evaluation: IntentEvaluation | null;
+  /**
+   * Fingerprint of every input this decision rests on. Recorded so execution
+   * can prove conditions have not moved since (see context.ts).
+   */
+  context_hash: string;
   failover_behavior: FailoverBehavior;
   decision_timestamp: string;
   /** Expiry of the execution grant an ALLOW confers. */
@@ -179,6 +192,8 @@ export interface AuthorizationEvaluation {
         | 'expires_at'
       >
     >;
+    /** The request context as evaluated, so corrective actions and replay need no second lookup. */
+    request_context: Record<string, unknown>;
   };
 }
 
@@ -201,6 +216,7 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     constraints_evaluated: [] as ConstraintCheck[],
     approval_requirement: null,
     approval_state: null,
+    intent_evaluation: null,
     expires_at: null,
   };
 
@@ -229,6 +245,13 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
       policy_hash: null,
       authority_lease_id: null,
       failover_behavior: SYSTEM_FALLBACK_FAILOVER,
+      context_hash: computeDecisionContextHash({
+        request_hash: request.request_hash,
+        policy_version_id: snapshot.policy?.policy_version_id ?? null,
+        policy_hash: null,
+        authority_lease_id: null,
+        signals: snapshot.signals,
+      }),
       evaluation: {
         agent_status: agent.status,
         policy_outcome: null,
@@ -238,6 +261,7 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
         authority_effects_applied: [],
         dependency_health: snapshot.dependencies,
         signals_considered: signalsConsidered,
+        request_context: request.context,
       },
     };
   }
@@ -258,6 +282,30 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     signals: snapshot.dependencies.signals_available ? snapshot.signals : [],
   };
   const policyOutcome = evaluatePolicy(document, policyInput);
+
+  /**
+   * What policy would have said with no risk information at all.
+   *
+   * Used for exactly one thing: deciding whether an approver was named
+   * *independently of any signal*. A signal may add an approval requirement to
+   * an action policy already permits -- that is authority decay, and it makes
+   * the outcome stricter. It may not be the reason an approver exists at all,
+   * because that turns a refusal into a request a human can grant.
+   *
+   * Found by the randomised containment property in
+   * packages/core/test/invariants.test.ts, which produced a lease whose
+   * currency did not cover the request (a hard DENY: policy named nobody who
+   * could supply the difference) and then raised the fraud signal above the
+   * escalation threshold. The high-risk rule named a treasurer, the shortfall
+   * became something a treasurer could approve, and asserting *more* risk had
+   * produced a *more* permissive outcome. A compromised fraud engine could
+   * summon an approval request for any action the agent's authority did not
+   * cover, and use the approver as a confused deputy.
+   */
+  const baselineOutcome =
+    policyInput.signals.length === 0
+      ? policyOutcome
+      : evaluatePolicy(document, { ...policyInput, signals: [] });
 
   const signalFailover = document.failure_modes.signal_unavailable;
   const enforcementFailover = document.failure_modes.enforcement_unavailable;
@@ -307,6 +355,19 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
   const selected = selectLease(findings, request.presented_lease_id);
   const autonomy = describeAutonomy(findings, selected, policyOutcome);
 
+  // -- 2b. Intent ------------------------------------------------------------
+  // Authority asks whether the agent may do this; intent asks whether this is
+  // what it said it was here to do. A purpose-bound grant binds even when the
+  // policy declares no intents at all.
+  const selectedLease = snapshot.candidates.find((c) => c.lease.id === selected?.lease_id)?.lease;
+  const intentEvaluation = evaluateIntent({
+    action: request.action,
+    declared_intent: request.declared_intent,
+    policy_intents: document.intents,
+    require_declaration: document.intent_required,
+    lease_purpose: selectedLease?.purpose ?? null,
+  });
+
   // -- 3. Combine ------------------------------------------------------------
   //
   //   envelope failure  -> DENY, terminal.
@@ -323,6 +384,13 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     decision = 'DENY';
     reasonCode = 'AGENT_NOT_ACTIVE';
     approvalRequirement = null;
+  } else if (!intentEvaluation.match) {
+    // Terminal, and deliberately ahead of the authority check: "you were not
+    // sent to do this" is a more specific statement than "you cannot do this",
+    // and no approval turns one task into another.
+    decision = 'DENY';
+    reasonCode = 'INTENT_MISMATCH';
+    approvalRequirement = null;
   } else if (policyOutcome.decision === 'DENY') {
     decision = 'DENY';
     approvalRequirement = null;
@@ -331,7 +399,21 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     reasonCode = envelopeReasonCode(findings, selected);
     approvalRequirement = null;
   } else if (!selected.autonomous) {
-    if (approvalRequirement) {
+    // Who may supply the difference, and for what.
+    //
+    // DECAY: the base grant covered this attempt and a signal shrank it. The
+    // human is being asked to restore authority the agent genuinely held, so
+    // an approver named by that same signal is legitimate -- this is authority
+    // decay working as designed, and it is why the signal plane exists.
+    //
+    // Otherwise the shortfall is the agent's own authority falling short, and
+    // only an approver policy would have named *without any signal* can supply
+    // it. A signal must never be the thing that makes a refusal approvable:
+    // that would let a compromised source summon an approval request for an
+    // action the agent's authority never covered. See baselineOutcome above.
+    const rescuable =
+      autonomy.blocked_by?.kind === 'DECAY' || baselineOutcome.approval_requirement !== null;
+    if (approvalRequirement && rescuable) {
       decision = strictest(decision, 'ESCALATE');
       reasonCode =
         autonomy.blocked_by?.kind === 'DECAY'
@@ -344,6 +426,7 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
       // named who could supply the difference. Fail closed.
       decision = 'DENY';
       reasonCode = 'CONSTRAINT_VIOLATION';
+      approvalRequirement = null;
     }
   }
 
@@ -417,6 +500,14 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
       [],
     approval_requirement: approvalRequirement,
     approval_state: approvalState,
+    intent_evaluation: intentEvaluation,
+    context_hash: computeDecisionContextHash({
+      request_hash: request.request_hash,
+      policy_version_id: snapshot.policy.policy_version_id,
+      policy_hash: policyOutcome.policy_hash,
+      authority_lease_id: selected?.lease_id ?? null,
+      signals: snapshot.signals,
+    }),
     failover_behavior: failover,
     expires_at: decision === 'ALLOW' ? toIso(addSeconds(now, ttl)) : null,
     evaluation: {
@@ -431,6 +522,7 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
       })),
       dependency_health: snapshot.dependencies,
       signals_considered: signalsConsidered,
+      request_context: request.context,
     },
   };
 }
@@ -473,9 +565,11 @@ function envelopeReasonCode(
       ? 'AUTHORITY_REVOKED'
       : status === 'SUSPENDED'
         ? 'AUTHORITY_SUSPENDED'
-        : status === 'EXPIRED'
-          ? 'AUTHORITY_EXPIRED'
-          : 'AUTHORITY_MISSING';
+        : status === 'CONSUMED'
+          ? 'AUTHORITY_CONSUMED'
+          : status === 'EXPIRED'
+            ? 'AUTHORITY_EXPIRED'
+            : 'AUTHORITY_MISSING';
   }
   const failure = selected.base_coverage.failure;
   if (failure?.kind === 'RESOURCE_NOT_GRANTED') return 'RESOURCE_NOT_IN_AUTHORITY';

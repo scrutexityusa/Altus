@@ -1,5 +1,6 @@
-import { ScrutexityError, newId } from '@scrutexity/core';
+import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
 import { reevaluateWithApprovals } from './authorization.js';
@@ -42,7 +43,11 @@ export async function submitApproval(
       `this approval request is already ${approvalRequest.status}`,
     );
   }
-  if (approvalRequest.expires_at.getTime() <= Date.now()) {
+  // Database time, like every other expiry. An approval window is authority
+  // with a deadline, and the deadline must not depend on which replica the
+  // approver's request happened to reach.
+  const now = await securityNow(client);
+  if (isExpired(approvalRequest.expires_at, now)) {
     await client.query(
       `UPDATE scrutexity.approval_requests SET status = 'EXPIRED', resolved_at = now() WHERE id = $1`,
       [input.approvalRequestId],
@@ -68,8 +73,9 @@ export async function submitApproval(
     await client.query(
       `INSERT INTO scrutexity.approvals
          (id, organization_id, approval_request_id, approver_user_id, vote,
-          roles_at_decision, satisfied_role, comment, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          roles_at_decision, satisfied_role, comment, idempotency_key,
+          approved_context_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         approvalId,
         input.organizationId,
@@ -82,6 +88,9 @@ export async function submitApproval(
         satisfiedRole,
         input.comment ?? null,
         input.idempotencyKey ?? null,
+        // The conditions this human was shown. Execution refuses to proceed if
+        // they have moved since (see services/execution.ts).
+        approvalRequest.context_hash,
       ],
     );
   } catch (error) {
@@ -111,6 +120,7 @@ export async function submitApproval(
       satisfied_role: satisfiedRole,
       requirement: approvalRequest.requirement,
       comment: input.comment ?? null,
+      approved_context_hash: approvalRequest.context_hash,
     },
   });
 

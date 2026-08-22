@@ -78,6 +78,24 @@ web: ## Run the dashboard
 demo: build ## Run the full treasury demo from a clean database
 	pnpm exec tsx scripts/demo.ts
 
+.PHONY: adversarial
+adversarial: build ## Run the adversarial conformance suite (11 security invariants)
+	# Not an alias for a subset of the unit tests. Each scenario mounts a real
+	# attack through the public API against a real database, and reports
+	# whether the invariant held, whether the provider was contacted, and what
+	# evidence was produced. Exits non-zero if any invariant fails.
+	pnpm exec tsx scripts/adversarial.ts
+
+.PHONY: recovery
+recovery: build ## Kill the API mid-payment and prove what survived
+	# Runs the API as a real child process and destroys it with SIGKILL at two
+	# instants: after the execution claim commits but before any money moves,
+	# and after the money moves but before settlement is recorded. A different
+	# process then retries against the same database. The adversarial suite's
+	# A9 and A10 assert the same invariants against rewound state; this proves
+	# a real crash produces that state. Exits non-zero if any invariant fails.
+	pnpm exec tsx scripts/recovery.ts
+
 .PHONY: test
 test: ## Run every test
 	pnpm exec vitest run
@@ -87,8 +105,11 @@ test-unit: ## Run the pure-domain tests (no database required)
 	pnpm exec vitest run packages
 
 .PHONY: typecheck
-typecheck: ## Typecheck every package
-	pnpm exec tsc -b tsconfig.build.json
+typecheck: ## Typecheck every package, sources and tests
+	# Both passes, matching CI exactly. tsconfig.build.json excludes test files,
+	# so a type error in a test escaped `make lint` entirely and only surfaced
+	# in CI. A local gate that is weaker than the remote one is not a gate.
+	pnpm run typecheck
 
 .PHONY: fmt
 fmt: ## Format
@@ -97,8 +118,9 @@ fmt: ## Format
 .PHONY: lint
 lint: ## Check formatting, types and contract drift
 	pnpm exec prettier --check .
-	pnpm exec tsc -b tsconfig.build.json
+	pnpm run typecheck
 	pnpm exec tsx scripts/generate-specs.ts --check
+	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
 .PHONY: spec
 spec: ## Regenerate the OpenAPI and policy schema from the code
@@ -111,4 +133,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test build demo ## Everything CI runs
+ci: install lint test build demo adversarial recovery ## Everything CI runs

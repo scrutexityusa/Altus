@@ -8,6 +8,9 @@ import { authenticate } from './auth.js';
 import { toErrorResponse } from './errors.js';
 import { metrics, renderMetrics } from './metrics.js';
 import { loadEvidenceKeys, type EvidenceKeys } from './services/evidence.js';
+import { loadSecretProvider } from './keys/provider.js';
+import { loadProviders } from './adapter/registry.js';
+import type { ProviderRegistry } from './adapter/provider.js';
 import { registerRoutes } from './routes/index.js';
 
 export interface App {
@@ -38,14 +41,30 @@ const PUBLIC_PATHS = new Set(['/health', '/ready', '/metrics']);
  * same configuration checks as production; a config that skipped validation
  * because it came from an argument would be a config nobody had checked.
  */
-export async function buildApp(overrides: Record<string, string | number> = {}): Promise<App> {
+export async function buildApp(
+  overrides: Record<string, string | number> = {},
+  /**
+   * Replaces the configured execution providers.
+   *
+   * The only seam of its kind in the codebase, and it exists for one reason:
+   * the adversarial suite has to observe what actually reached the outside
+   * world, which means substituting a provider that records. Configuration
+   * cannot express "this specific instance".
+   *
+   * It cannot widen anything -- a provider is reached only after every check
+   * in the enforcement boundary has already passed -- and production builds
+   * its registry from `EXECUTION_PROVIDERS` like everything else.
+   */
+  providerOverride?: ProviderRegistry,
+): Promise<App> {
   const config = loadConfig({
     ...process.env,
     ...Object.fromEntries(Object.entries(overrides).map(([key, value]) => [key, String(value)])),
   });
   const logger = createLogger(config);
   const db = createDatabase(config);
-  const keys = loadEvidenceKeys(config);
+  const keys = await loadEvidenceKeys(config, loadSecretProvider(config));
+  const providers = providerOverride ?? loadProviders(config);
 
   const server = Fastify({
     loggerInstance: logger,
@@ -151,7 +170,7 @@ export async function buildApp(overrides: Record<string, string | number> = {}):
     instance.addHook('onResponse', async (request) => {
       (request as unknown as { span?: Span }).span?.end();
     });
-    await registerRoutes(instance, { db, keys });
+    await registerRoutes(instance, { db, keys, providers, config });
   });
 
   return {

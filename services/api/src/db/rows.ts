@@ -11,6 +11,12 @@ export interface LeaseRow {
   resources: Record<string, string[]>;
   constraints: Record<string, unknown>;
   status: AuthorityLease['status'];
+  grant_type: 'REUSABLE' | 'SINGLE_USE';
+  purpose: string | null;
+  claimed_at: Date | null;
+  claimed_by_decision_id: string | null;
+  consumed: boolean;
+  used_at: Date | null;
   revocable: boolean;
   parent_lease_id: string | null;
   depth: number;
@@ -32,6 +38,12 @@ export function toLease(row: LeaseRow): AuthorityLease {
       constraints: row.constraints,
     } as AuthorityGrant,
     status: row.status,
+    grant_type: row.grant_type,
+    purpose: row.purpose,
+    claimed_at: row.claimed_at ? row.claimed_at.toISOString() : null,
+    claimed_by_decision_id: row.claimed_by_decision_id,
+    consumed: row.consumed,
+    used_at: row.used_at ? row.used_at.toISOString() : null,
     revocable: row.revocable,
     parent_lease_id: row.parent_lease_id,
     depth: row.depth,

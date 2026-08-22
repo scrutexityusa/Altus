@@ -150,6 +150,68 @@ export const metrics = {
     'Receipt verification failures by check',
   ),
   replayAttempts: counter('scrutexity_replay_attempts_total', 'Rejected replays by kind'),
+
+  // -- Causal evidence, corrective handshake and grant lifecycle ------------
+  traceDuration: histogram(
+    'scrutexity_trace_duration_seconds',
+    'Root-cause trace assembly latency',
+    [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+  ),
+  traceNodes: histogram(
+    'scrutexity_trace_nodes',
+    'Nodes returned per root-cause trace',
+    [1, 2, 3, 5, 8, 13, 21, 34],
+  ),
+  correctiveActionsReturned: counter(
+    'scrutexity_corrective_actions_returned_total',
+    'Corrective actions offered with a refusal, by type and reason',
+  ),
+  singleUseGrantsClaimed: counter(
+    'scrutexity_single_use_grant_claimed_total',
+    'Single-use grants bound to an authorization decision',
+  ),
+  singleUseGrantsConsumed: counter(
+    'scrutexity_single_use_grant_consumed_total',
+    'Single-use grants spent by an execution',
+  ),
+  contextMismatches: counter(
+    'scrutexity_context_mismatch_total',
+    'Executions refused because conditions changed since the decision',
+  ),
+  intentMismatches: counter(
+    'scrutexity_intent_mismatch_total',
+    'Actions refused as outside the declared intent, by reason',
+  ),
+  signalInvalidSignature: counter(
+    'scrutexity_signal_invalid_signature_total',
+    'Signals rejected for a bad or unknown signature, by reason',
+  ),
+  // -- The execution enforcement boundary -----------------------------------
+  executionsClaimed: counter(
+    'scrutexity_executions_claimed_total',
+    'Execution rights atomically claimed against a grant, by provider',
+  ),
+  executionsSettled: counter(
+    'scrutexity_executions_settled_total',
+    'Enforced executions settled, by provider and provider-reported status',
+  ),
+  intentBindingMismatches: counter(
+    'scrutexity_intent_binding_mismatch_total',
+    'Executions refused because the operation did not match its grant, by kind',
+  ),
+  executionsUnresolved: counter(
+    'scrutexity_executions_unresolved_total',
+    'Enforced executions that ended without an answer from the provider, by provider',
+  ),
+  /**
+   * Any non-zero value here is an incident, not a trend. Alert on the first
+   * one within a five-minute window and route it to the security team.
+   */
+  authorityInvariantViolations: counter(
+    'scrutexity_authority_invariant_violations_total',
+    'Decisions refused because a constitutional authority invariant did not hold',
+  ),
+  securityEvents: counter('scrutexity_security_events_total', 'Security events recorded, by kind'),
   policyEvaluationFailures: counter(
     'scrutexity_policy_evaluation_failures_total',
     'Policy evaluations that could not complete',

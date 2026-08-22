@@ -2,7 +2,7 @@
 
 Mermaid. Every flow below is exercised by `make demo` and by the test suite.
 
-## 1. The complete treasury wire flow (Scenes 1–8)
+## 1. The complete treasury wire flow
 
 ```mermaid
 sequenceDiagram
@@ -17,7 +17,7 @@ sequenceDiagram
     actor T as Treasurer
 
     rect rgb(245,245,245)
-    note over Ops,DB: Scene 1–2 — identity and authority
+    note over Ops,DB: Agent identity, then authority issuance
     Ops->>API: POST /v1/agents
     API->>DB: insert agent (owner = a named human)
     Ops->>API: POST /v1/authority-leases
@@ -27,7 +27,7 @@ sequenceDiagram
     end
 
     rect rgb(240,248,240)
-    note over Agent,DB: Scene 2 — $25,000, inside discretion
+    note over Agent,DB: A $25,000 wire — inside the agent discretion
     Agent->>SDK: authorize(wire.execute, acct_001, $25,000)
     SDK->>API: POST /v1/authorization/evaluate
     API->>DB: BEGIN; SET LOCAL scrutexity.org_id
@@ -48,8 +48,8 @@ sequenceDiagram
     end
 
     rect rgb(255,250,235)
-    note over Agent,T: Scene 3–4 — $250,000, beyond discretion
-    Agent->>SDK: authorize(wire.execute, acct_001, $250,000)
+    note over Agent,T: A $75,000 wire — beyond discretion; the treasurer approves
+    Agent->>SDK: authorize(wire.execute, acct_001, $75,000)
     SDK->>API: POST /v1/authorization/evaluate
     API->>PDP: evaluateAuthorization(snapshot)
     note right of PDP: envelope ✓ · ceiling ✗<br/>policy: ESCALATE, treasurer
@@ -69,7 +69,7 @@ sequenceDiagram
     end
 
     rect rgb(250,240,240)
-    note over Ops,DB: Scene 8 — evidence
+    note over Ops,DB: Evidence
     Ops->>API: POST /v1/receipts/{id}/verify
     API->>DB: read receipt + preceding chain segment
     API->>PDP: verifyReceipt · verifyChain
@@ -78,7 +78,7 @@ sequenceDiagram
     end
 ```
 
-## 2. Delegation, and the violation it prevents (Scenes 5–6)
+## 2. Delegation, and the violation it prevents
 
 ```mermaid
 sequenceDiagram
@@ -123,7 +123,7 @@ sequenceDiagram
     end
 ```
 
-## 3. Authority decay from a risk signal (Scene 7)
+## 3. Authority decay from a risk signal
 
 ```mermaid
 sequenceDiagram

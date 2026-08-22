@@ -1,7 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
+  canonicalOperation,
+  describeInvariantFailure,
+  verifyAuthorityInvariants,
+  type AuthorityLease,
+  type InvariantReport,
+  computeBindingHash,
+  computeIntentHash,
+  type ExecutionGrantBinding,
   ScrutexityError,
   addSeconds,
+  computeCorrectiveActions,
   evaluateAuthorization,
   explainDecision,
   hashObject,
@@ -13,14 +23,17 @@ import {
   type Approval,
   type AuthorizationEvaluation,
   type EvaluationSnapshot,
+  type CorrectiveAction,
   type LeaseCandidate,
   type PolicyDocument,
   type SignalView,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type AgentRow, type LeaseRow, type SignalRow } from '../db/rows.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
+import { normalizeContext } from './request-context.js';
 
 /**
  * ============================================================================
@@ -41,6 +54,8 @@ export interface AuthorizeInput {
   resource: { type: string; id: string };
   context: Record<string, unknown>;
   presentedLeaseId?: string | null;
+  /** What the agent says it is doing; bound against policy intents and lease purpose. */
+  declaredIntent?: string | null;
   nonce?: string | null;
   idempotencyKey?: string | null;
   correlationId?: string | null;
@@ -52,6 +67,15 @@ export interface AuthorizeResult {
   receipt_id: string;
   evaluation: AuthorizationEvaluation;
   approval_request_id: string | null;
+  /** The next legitimate step, when policy admits one. Empty for an ALLOW. */
+  corrective_actions: CorrectiveAction[];
+  /**
+   * The operation this ALLOW authorises, and the authority it is bound to.
+   * Both null unless the decision was an ALLOW -- nothing else authorises an
+   * operation, so nothing else has an intent to bind. See ADR-0015.
+   */
+  exact_intent_hash: string | null;
+  binding_hash: string | null;
 }
 
 /** Context keys the control plane derives itself and will not accept from a caller. */
@@ -67,7 +91,11 @@ export async function authorize(
   input: AuthorizeInput,
 ): Promise<AuthorizeResult> {
   const started = performance.now();
-  const now = new Date();
+  // The authoritative instant for this whole decision. Every expiry judged
+  // below -- lease, ancestry, signal, approval, grant -- reads this one value,
+  // so the facts a decision rests on all held simultaneously. See
+  // db/security-clock.ts.
+  const now = await securityNow(client);
 
   // -- Agent ----------------------------------------------------------------
   const agentRow = await loadAgent(client, input.agentHandleOrId);
@@ -123,8 +151,9 @@ export async function authorize(
   await client.query(
     `INSERT INTO scrutexity.authorization_requests
        (id, organization_id, agent_id, presented_lease_id, action, resource_type,
-        resource_id, context, request_hash, nonce, idempotency_key, correlation_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        resource_id, context, request_hash, nonce, idempotency_key, correlation_id,
+        declared_intent)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
     [
       requestId,
       input.organizationId,
@@ -138,13 +167,43 @@ export async function authorize(
       input.nonce ?? null,
       input.idempotencyKey ?? null,
       input.correlationId ?? null,
+      input.declaredIntent ?? null,
     ],
   );
+
+  // Serialise contenders for this agent's single-use grants.
+  //
+  // A per-agent advisory lock rather than SELECT ... FOR UPDATE over the
+  // grants themselves. Row locks looked like the obvious tool and deadlocked
+  // under load: an agent holding several unspent grants had concurrent
+  // transactions acquire overlapping row locks, and ORDER BY does not reliably
+  // fix that because the planner is free to lock before it sorts. One lock
+  // keyed on the agent has no ordering to get wrong.
+  //
+  // Taken only when the agent actually holds an unspent single-use grant, so
+  // agents working purely from reusable authority stay fully concurrent. The
+  // unlocked probe is safe: a grant created after it is by definition
+  // unclaimed by this transaction, so it cannot be double-spent here.
+  //
+  // The lock is transaction-scoped and is always acquired before the evidence
+  // chain head, which is the only other lock on this path -- so the two can
+  // never form a cycle.
+  const hasSingleUse = await client.query(
+    `SELECT 1 FROM scrutexity.authority_leases
+      WHERE agent_id = $1 AND grant_type = 'SINGLE_USE' AND NOT consumed
+      LIMIT 1`,
+    [agentRow.id],
+  );
+  if ((hasSingleUse.rowCount ?? 0) > 0) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [agentRow.id]);
+  }
 
   const snapshot = await buildSnapshot(client, {
     now,
     organizationId: input.organizationId,
     requestId,
+    requestHash,
+    declaredIntent: input.declaredIntent ?? null,
     agentRow,
     action: input.action,
     resource: input.resource,
@@ -157,6 +216,21 @@ export async function authorize(
   const evaluation = evaluateAuthorization(snapshot);
   metrics.policyEvaluationLatency.observe((performance.now() - evaluationStarted) / 1000);
 
+  // Before the ALLOW is written, let alone returned.
+  assertAuthorityInvariants(evaluation, snapshot, now, input.organizationId);
+
+  // The approval request id is minted before the corrective handshake is
+  // computed, so an escalation can hand the caller the request it must act on
+  // rather than a null it has to go and look up.
+  const approvalRequestId =
+    evaluation.decision === 'ESCALATE' && evaluation.approval_requirement
+      ? newId('approvalRequest')
+      : null;
+
+  const correctiveActions = await buildCorrectiveActions(client, evaluation, snapshot, {
+    approvalRequestId,
+  });
+
   const persisted = await persistDecision(client, keys, {
     organizationId: input.organizationId,
     requestId,
@@ -165,9 +239,19 @@ export async function authorize(
     evaluation,
     supersedesDecisionId: null,
     startedAt: started,
+    correctiveActions,
+    approvalRequestId,
+    requestContext: normalizedContext,
   });
 
-  return { request_id: requestId, ...persisted, evaluation };
+  await claimSingleUseGrant(client, evaluation, persisted.decision_id);
+
+  return {
+    request_id: requestId,
+    ...persisted,
+    evaluation,
+    corrective_actions: correctiveActions,
+  };
 }
 
 /**
@@ -183,7 +267,7 @@ export async function reevaluateWithApprovals(
   approvalRequestId: string,
 ): Promise<AuthorizeResult | null> {
   const started = performance.now();
-  const now = new Date();
+  const now = await securityNow(client);
 
   const apr = await client.query(
     `SELECT ar.*, d.id AS decision_id
@@ -211,6 +295,8 @@ export async function reevaluateWithApprovals(
     now,
     organizationId,
     requestId: request.id,
+    requestHash: request.request_hash,
+    declaredIntent: request.declared_intent ?? null,
     agentRow,
     action: request.action,
     resource: { type: request.resource_type, id: request.resource_id },
@@ -225,6 +311,16 @@ export async function reevaluateWithApprovals(
   });
 
   const evaluation = evaluateAuthorization(snapshot);
+  // A human approval releases authority, so it goes through the same
+  // postcondition as an autonomous ALLOW. An approver cannot authorise a
+  // violation of the laws either.
+  assertAuthorityInvariants(evaluation, snapshot, now, organizationId);
+
+  const reevaluationActions = await buildCorrectiveActions(client, evaluation, snapshot, {
+    // The escalation is being resolved, not reopened, so there is no new
+    // approval request to point at.
+    approvalRequestId: null,
+  });
 
   const persisted = await persistDecision(client, keys, {
     organizationId,
@@ -236,7 +332,15 @@ export async function reevaluateWithApprovals(
     startedAt: started,
     // The re-evaluation resolves the escalation; do not open another one.
     suppressApprovalRequest: true,
+    correctiveActions: reevaluationActions,
+    requestContext: request.context,
+    // The fingerprint the approvers were actually shown. Binding it means an
+    // execution presented against a different approval fails the binding check
+    // even when the operation itself is byte-identical.
+    approvedContextHash: approvalRequest.context_hash ?? null,
   });
+
+  await claimSingleUseGrant(client, evaluation, persisted.decision_id);
 
   const nextStatus =
     evaluation.decision === 'ALLOW'
@@ -259,7 +363,12 @@ export async function reevaluateWithApprovals(
     });
   }
 
-  return { request_id: request.id, ...persisted, evaluation };
+  return {
+    request_id: request.id,
+    ...persisted,
+    evaluation,
+    corrective_actions: reevaluationActions,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +379,8 @@ interface SnapshotInput {
   now: Date;
   organizationId: string;
   requestId: string;
+  requestHash: string;
+  declaredIntent: string | null;
   agentRow: AgentRow;
   action: string;
   resource: { type: string; id: string };
@@ -300,6 +411,8 @@ async function buildSnapshot(
       id: input.requestId,
       organization_id: input.organizationId,
       agent_id: input.agentRow.id,
+      request_hash: input.requestHash,
+      declared_intent: input.declaredIntent,
       action: input.action,
       resource: { ...input.resource, attributes },
       context: input.context,
@@ -328,33 +441,6 @@ async function buildSnapshot(
  * influence anything. A caller that sends `"amount": 0.1` gets an
  * INVALID_REQUEST, not a threshold comparison against a float.
  */
-function normalizeContext(context: Record<string, unknown>): Record<string, unknown> {
-  const normalized: Record<string, unknown> = { ...context };
-  const amount = normalized['amount'];
-  const currency = normalized['currency'];
-  if (amount !== undefined && amount !== null) {
-    if (typeof currency !== 'string') {
-      throw new ScrutexityError('INVALID_REQUEST', 'context.amount requires context.currency');
-    }
-    if (typeof amount !== 'string' && typeof amount !== 'number') {
-      throw new ScrutexityError(
-        'INVALID_REQUEST',
-        'context.amount must be a decimal string or an integer',
-      );
-    }
-    try {
-      normalized['amount'] = parseMoney(amount, currency);
-    } catch (error) {
-      throw new ScrutexityError(
-        'INVALID_REQUEST',
-        error instanceof Error ? error.message : 'invalid amount',
-      );
-    }
-    normalized['currency'] = currency.toUpperCase();
-  }
-  return normalized;
-}
-
 /** Facts the control plane establishes itself from the tenant's own records. */
 async function deriveContext(
   client: PoolClient,
@@ -576,24 +662,66 @@ interface PersistInput {
   supersedesDecisionId: string | null;
   startedAt: number;
   suppressApprovalRequest?: boolean;
+  correctiveActions: CorrectiveAction[];
+  approvalRequestId?: string | null;
+  /**
+   * The context the decision was evaluated against, after server-derived facts
+   * replaced anything the caller asserted. This -- not the caller's original
+   * body -- is what the intent hash is computed from.
+   */
+  requestContext: Record<string, unknown>;
+  /**
+   * The TOCTOU fingerprint the approvers were shown, when this decision is a
+   * re-evaluation after human approval. Bound into the grant so that an
+   * execution presented against a different approval fails even though the
+   * operation itself is untouched.
+   */
+  approvedContextHash?: string | null;
 }
 
 async function persistDecision(
   client: PoolClient,
   keys: EvidenceKeys,
   input: PersistInput,
-): Promise<{ decision_id: string; receipt_id: string; approval_request_id: string | null }> {
+): Promise<{
+  decision_id: string;
+  receipt_id: string;
+  approval_request_id: string | null;
+  exact_intent_hash: string | null;
+  binding_hash: string | null;
+}> {
   const { evaluation } = input;
   const decisionId = newId('decision');
   const durationUs = Math.round((performance.now() - input.startedAt) * 1000);
+
+  // -- Exact intent binding -------------------------------------------------
+  //
+  // Only an ALLOW gets a binding, because only an ALLOW authorises an
+  // operation. Computing one for a DENY would be recording authority that was
+  // never granted.
+  //
+  // The binding is computed *here*, from the evaluated request, and never from
+  // anything a caller supplies. That is the whole point: a hash the agent
+  // provides proves only that the agent can compute a hash. See ADR-0015.
+  const binding =
+    evaluation.decision === 'ALLOW'
+      ? buildBinding(
+          decisionId,
+          evaluation,
+          input.requestContext,
+          input.approvedContextHash ?? null,
+        )
+      : null;
 
   await client.query(
     `INSERT INTO scrutexity.authorization_decisions
        (id, organization_id, request_id, agent_id, decision, reason_code, policy_id,
         policy_version_id, policy_hash, authority_lease_id, evaluation, approval_requirement,
         failover_behavior, risk_signal_ids, approval_ids, supersedes_decision_id,
-        expires_at, decided_at, evaluation_duration_us)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+        expires_at, decided_at, evaluation_duration_us, context_hash, intent_evaluation,
+        corrective_actions, exact_intent_hash, binding_hash, binding_nonce, authorized_intent)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+             $23,$24,$25,$26)`,
     [
       decisionId,
       input.organizationId,
@@ -614,6 +742,13 @@ async function persistDecision(
       evaluation.expires_at,
       evaluation.decision_timestamp,
       durationUs,
+      evaluation.context_hash,
+      evaluation.intent_evaluation ? JSON.stringify(evaluation.intent_evaluation) : null,
+      JSON.stringify(input.correctiveActions),
+      binding?.intent_hash ?? null,
+      binding?.binding_hash ?? null,
+      binding?.binding.nonce ?? null,
+      binding ? JSON.stringify(binding.binding.authorized_intent) : null,
     ],
   );
 
@@ -623,11 +758,12 @@ async function persistDecision(
     evaluation.approval_requirement &&
     !input.suppressApprovalRequest
   ) {
-    approvalRequestId = newId('approvalRequest');
+    approvalRequestId = input.approvalRequestId ?? newId('approvalRequest');
     await client.query(
       `INSERT INTO scrutexity.approval_requests
-         (id, organization_id, decision_id, request_id, requirement, status, expires_at)
-       VALUES ($1,$2,$3,$4,$5,'PENDING',$6)`,
+         (id, organization_id, decision_id, request_id, requirement, status, expires_at,
+          context_hash)
+       VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)`,
       [
         approvalRequestId,
         input.organizationId,
@@ -638,6 +774,9 @@ async function persistDecision(
           new Date(evaluation.decision_timestamp),
           evaluation.approval_requirement.ttl_seconds,
         ),
+        // The conditions the approvers are being shown. Recorded here so an
+        // approval can be bound to them and execution can verify they held.
+        evaluation.context_hash,
       ],
     );
   }
@@ -669,7 +808,18 @@ async function persistDecision(
       failover_behavior: evaluation.failover_behavior,
       supersedes_decision_id: input.supersedesDecisionId,
       decision_timestamp: evaluation.decision_timestamp,
+      // The conditions this decision rests on, so a verifier can tell whether
+      // an execution happened under the same facts that were approved.
+      context_hash: evaluation.context_hash,
+      intent_evaluation: evaluation.intent_evaluation,
+      corrective_actions: input.correctiveActions,
       explanation_text: explanation.text,
+      // The operation this decision authorised, and its two hashes. A verifier
+      // holding only the receipt can recompute both and check them, without
+      // access to the database that issued them.
+      exact_intent_hash: binding?.intent_hash ?? null,
+      binding_hash: binding?.binding_hash ?? null,
+      authorized_intent: binding?.binding.authorized_intent ?? null,
     },
   });
 
@@ -686,7 +836,227 @@ async function persistDecision(
     decision_id: decisionId,
     receipt_id: receipt.id,
     approval_request_id: approvalRequestId,
+    exact_intent_hash: binding?.intent_hash ?? null,
+    binding_hash: binding?.binding_hash ?? null,
   };
+}
+
+/**
+ * Builds the grant binding for an ALLOW.
+ *
+ * Every input comes from the evaluated request or from the decision being
+ * written. Nothing here is caller-supplied, and nothing here reads the clock
+ * beyond the decision timestamp the evaluator already fixed, so the same
+ * evaluation always produces the same binding except for the nonce.
+ *
+ * The nonce is fresh randomness rather than a derivation of the decision id,
+ * so that two legitimately identical operations -- the same supplier, the same
+ * amount, twice in a day -- cannot produce interchangeable bindings.
+ */
+function buildBinding(
+  decisionId: string,
+  evaluation: AuthorizationEvaluation,
+  requestContext: Record<string, unknown>,
+  approvedContextHash: string | null,
+): { intent_hash: string; binding_hash: string; binding: ExecutionGrantBinding } {
+  const authorizedIntent = canonicalOperation({
+    action: evaluation.action,
+    resource: evaluation.resource,
+    context: requestContext,
+  });
+  const binding: ExecutionGrantBinding = {
+    authorized_intent: authorizedIntent,
+    authorization_context: {
+      decision_id: decisionId,
+      authority_lease_id: evaluation.authority_lease_id,
+      policy_version_id: evaluation.policy_version_id,
+      policy_hash: evaluation.policy_hash,
+      approved_context_hash: approvedContextHash,
+    },
+    grant_id: decisionId,
+    // An ALLOW always carries an expiry; the schema requires it. The fallback
+    // exists so a future decision shape cannot silently bind an eternal grant.
+    expires_at: evaluation.expires_at ?? evaluation.decision_timestamp,
+    nonce: randomUUID(),
+  };
+  return {
+    intent_hash: computeIntentHash(authorizedIntent),
+    binding_hash: computeBindingHash(binding),
+    binding,
+  };
+}
+
+/**
+ * The postcondition on every ALLOW.
+ *
+ * The evaluator already used the containment lattice to *derive* its answer.
+ * This checks the answer against the laws afterwards, which is a different
+ * thing: derivation is only as good as the code doing it, and a bug there --
+ * or a row written straight to the database, or a dropped constraint --
+ * previously produced a wrong ALLOW with nothing to notice.
+ *
+ * Runs only for ALLOW. A DENY that violates an invariant is still a DENY, and
+ * re-checking it would spend work to reach the same refusal; an ESCALATE has
+ * not conferred anything yet and will pass through here when it is resolved.
+ *
+ * A violation is never a policy denial. `AUTHORITY_INVARIANT_VIOLATION` exists
+ * so an operator who sees denials all day cannot miss the one that means the
+ * system's model of its own authority is wrong.
+ */
+function assertAuthorityInvariants(
+  evaluation: AuthorizationEvaluation,
+  snapshot: { candidates: readonly { lease: AuthorityLease; chain: readonly AuthorityLease[] }[] },
+  now: Date,
+  organizationId: string,
+): void {
+  if (evaluation.decision !== 'ALLOW') return;
+
+  const leaseId = evaluation.evaluation.selected_lease_id;
+  if (!leaseId) return;
+
+  const candidate = snapshot.candidates.find((c) => c.lease.id === leaseId);
+  const finding = evaluation.evaluation.authority_findings.find((f) => f.lease_id === leaseId);
+  if (!candidate) {
+    // An ALLOW naming a lease that was not among the candidates evaluated is
+    // itself a violation: the decision rests on authority the evaluator did
+    // not see.
+    throw invariantViolation(
+      { valid: false, checks: [], failed: ['ANCESTRY_COMPLETE'] },
+      organizationId,
+      evaluation,
+      { reason: 'selected lease was not among the evaluated candidates', lease_id: leaseId },
+    );
+  }
+
+  const report = verifyAuthorityInvariants({
+    now,
+    chain: candidate.chain,
+    effectiveGrant: finding?.effective_grant ?? undefined,
+  });
+  if (report.valid) return;
+
+  metrics.authorityInvariantViolations.inc({ invariant: report.failed.join('+') });
+  throw invariantViolation(report, organizationId, evaluation, {});
+}
+
+function invariantViolation(
+  report: InvariantReport,
+  organizationId: string,
+  evaluation: AuthorizationEvaluation,
+  extra: Record<string, unknown>,
+): ScrutexityError {
+  return new ScrutexityError('AUTHORITY_INVARIANT_VIOLATION', describeInvariantFailure(report), {
+    // The caller learns nothing beyond the generic message. A principal that
+    // can probe which law broke can map the authority graph by watching
+    // which of its requests trip which invariant.
+    internal: {
+      securityEvent: {
+        organizationId,
+        kind: 'AUTHORITY_INVARIANT_VIOLATION',
+        subjectId: evaluation.agent_id,
+        detail: {
+          failed: report.failed,
+          checks: report.checks.filter((c) => !c.passed),
+          action: evaluation.action,
+          resource_type: evaluation.resource.type,
+          authority_lease_id: evaluation.authority_lease_id,
+          policy_version_id: evaluation.policy_version_id,
+          ...extra,
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Binds a single-use grant to the decision that spent it.
+ *
+ * The WHERE clause is the exactly-once boundary. The row is already locked for
+ * this transaction, so a competing claim cannot be interleaved; the guard is
+ * there so that even without the lock the database, not the application,
+ * decides who won. Zero rows means someone else got there first, which under
+ * the lock can only happen through a bug -- so it is raised rather than
+ * swallowed.
+ */
+async function claimSingleUseGrant(
+  client: PoolClient,
+  evaluation: AuthorizationEvaluation,
+  decisionId: string,
+): Promise<void> {
+  if (evaluation.decision !== 'ALLOW' || !evaluation.authority_lease_id) return;
+
+  const claimed = await client.query(
+    `UPDATE scrutexity.authority_leases
+        SET claimed_at = now(), claimed_by_decision_id = $2
+      WHERE id = $1
+        AND grant_type = 'SINGLE_USE'
+        AND NOT consumed
+        AND claimed_at IS NULL
+      RETURNING id`,
+    [evaluation.authority_lease_id, decisionId],
+  );
+
+  if ((claimed.rowCount ?? 0) > 0) {
+    metrics.singleUseGrantsClaimed.inc({});
+    return;
+  }
+
+  const grant = await client.query(
+    `SELECT grant_type, claimed_by_decision_id FROM scrutexity.authority_leases WHERE id = $1`,
+    [evaluation.authority_lease_id],
+  );
+  const row = grant.rows[0] as
+    { grant_type: string; claimed_by_decision_id: string | null } | undefined;
+  if (row?.grant_type === 'SINGLE_USE' && row.claimed_by_decision_id !== decisionId) {
+    throw new ScrutexityError(
+      'STATE_CONFLICT',
+      'this single-use authority was claimed concurrently; re-evaluate',
+      { internal: { lease: evaluation.authority_lease_id, holder: row.claimed_by_decision_id } },
+    );
+  }
+}
+
+/**
+ * Corrective actions are computed by the core policy layer from the decision
+ * record itself. This function supplies only the surrounding facts core cannot
+ * see: who delegated the authority in play, and which intents policy declares.
+ */
+async function buildCorrectiveActions(
+  client: PoolClient,
+  evaluation: AuthorizationEvaluation,
+  snapshot: EvaluationSnapshot,
+  options: { approvalRequestId: string | null },
+): Promise<CorrectiveAction[]> {
+  if (evaluation.decision === 'ALLOW') return [];
+
+  let delegatingAgentHandle: string | null = null;
+  const selected = snapshot.candidates.find(
+    (candidate) => candidate.lease.id === evaluation.authority_lease_id,
+  );
+  const parentLeaseId = selected?.lease.parent_lease_id ?? null;
+  if (parentLeaseId) {
+    const issuer = await client.query(
+      `SELECT a.handle FROM scrutexity.authority_leases l
+         JOIN scrutexity.agents a ON a.id = l.agent_id
+        WHERE l.id = $1`,
+      [parentLeaseId],
+    );
+    delegatingAgentHandle = (issuer.rows[0]?.handle as string | undefined) ?? null;
+  }
+
+  const actions = computeCorrectiveActions(evaluation, {
+    delegating_agent_handle: delegatingAgentHandle,
+    approval_request_id: options.approvalRequestId,
+    known_intents: snapshot.policy?.document.intents.map((intent) => intent.id) ?? [],
+  });
+
+  for (const action of actions) {
+    metrics.correctiveActionsReturned.inc({ type: action.type, reason: action.reason });
+  }
+  if (evaluation.intent_evaluation && !evaluation.intent_evaluation.match) {
+    metrics.intentMismatches.inc({ reason: evaluation.intent_evaluation.reason });
+  }
+  return actions;
 }
 
 export { lookupAction };

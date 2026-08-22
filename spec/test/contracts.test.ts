@@ -1,8 +1,11 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
+// ajv and ajv-formats are CommonJS. Under NodeNext their types describe the
+// module namespace, while the value the bundler hands us at runtime is the
+// callable default. `createRequire` gets both to agree without pretending the
+// namespace is constructible.
+import { createRequire } from 'node:module';
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -21,9 +24,42 @@ const openapi = JSON.parse(readFileSync(join(root, 'spec/openapi.json'), 'utf8')
 const policySchema = JSON.parse(readFileSync(join(root, 'spec/policy.schema.json'), 'utf8'));
 
 describe('policy JSON Schema', () => {
+  const require = createRequire(import.meta.url);
+  const Ajv = require('ajv') as new (options: Record<string, unknown>) => {
+    compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown };
+  };
+  const addFormats = require('ajv-formats') as (ajv: unknown) => void;
   const ajv = new Ajv({ allErrors: true, strict: false });
   addFormats(ajv);
   const validate = ajv.compile(policySchema);
+
+  /**
+   * The published schema is a hand-written mirror of PolicyDocumentSchema,
+   * because the authored form and the stored form differ -- the stored one has
+   * been through a normalising transform. Two sources of truth drift, and this
+   * one had: `intent`, `intents` and `intent_required` were accepted by the
+   * platform and rejected by the schema it publishes, so a customer validating
+   * a valid intent-bound policy would have been told it was invalid.
+   *
+   * This test is the thing that stops that recurring. It does not check the
+   * shapes match -- they legitimately differ -- only that the published
+   * contract knows about every top-level key the platform accepts.
+   */
+  it('publishes a schema that knows every field the platform accepts', async () => {
+    const { POLICY_DOCUMENT_FIELDS } = await import('@scrutexity/core');
+    const schema = JSON.parse(readFileSync(join(root, 'spec/policy.schema.json'), 'utf8')) as {
+      definitions: Record<string, { properties: Record<string, unknown> }>;
+    };
+
+    const published = new Set(
+      Object.keys(schema.definitions['ScrutexityPolicyDocument']!.properties),
+    );
+    const missing = POLICY_DOCUMENT_FIELDS.filter((key) => !published.has(key));
+    expect(
+      missing,
+      'the platform accepts these policy fields but the published schema rejects them',
+    ).toEqual([]);
+  });
 
   it('accepts every policy pack the platform ships', () => {
     const policyDir = join(root, 'policies');

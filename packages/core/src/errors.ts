@@ -15,12 +15,49 @@ export const ERROR_CODES = [
   'AUTHORITY_REVOKED',
   'AUTHORITY_SUSPENDED',
   'CONSTRAINT_VIOLATION',
+  'AUTHORITY_CONSUMED',
   'DELEGATION_EXCEEDS_PARENT',
+  'INTENT_MISMATCH',
+  // The conditions a decision was made under changed before it was used.
+  'APPROVAL_CONTEXT_MISMATCH',
+  'CONTEXT_CHANGED',
+  // Signal plane
+  'SIGNAL_SIGNATURE_INVALID',
+  'SIGNAL_KEY_UNKNOWN',
+  /**
+   * The signal's source has no signing key registered in this tenant.
+   *
+   * Distinct from SIGNAL_KEY_UNKNOWN, which means "this source is enrolled and
+   * that key id is not one of its keys". This means the source is not known to
+   * the tenant at all, so nothing it asserts is attributable to anyone. The
+   * two are separated because they call for different operator actions --
+   * enrol the source, versus investigate a key id that should not exist.
+   */
+  'SIGNAL_SOURCE_NOT_ENROLLED',
   // Control-plane availability
   'POLICY_UNAVAILABLE',
   'SIGNAL_UNAVAILABLE',
   'ENFORCEMENT_UNAVAILABLE',
   // Integrity
+  /**
+   * A constitutional invariant did not hold at runtime.
+   *
+   * Deliberately distinct from POLICY_DENIED. A policy denial is ordinary and
+   * an operator sees them all day; this means the system's model of its own
+   * authority is wrong, which is a different and much worse fact. Collapsing
+   * it into a generic 403 would bury the one signal nobody may miss.
+   */
+  'AUTHORITY_INVARIANT_VIOLATION',
+  /**
+   * A prior execution against this grant exists and has not been resolved.
+   *
+   * Distinct from REPLAY_DETECTED, which means "this was already done". This
+   * means "this may or may not have been done, and nobody knows yet" -- the
+   * state left behind when the provider was reached but the outcome was never
+   * recorded. Retrying is not safe; reconciling is the only correct move, and
+   * the caller has to be told which of the two it is looking at.
+   */
+  'EXECUTION_UNRESOLVED',
   'REPLAY_DETECTED',
   'IDEMPOTENCY_CONFLICT',
   'EVIDENCE_TAMPERED',
@@ -43,13 +80,22 @@ const STATUS: Record<ErrorCode, number> = {
   AUTHORITY_REVOKED: 403,
   AUTHORITY_SUSPENDED: 403,
   CONSTRAINT_VIOLATION: 403,
+  AUTHORITY_CONSUMED: 403,
   DELEGATION_EXCEEDS_PARENT: 422,
+  INTENT_MISMATCH: 403,
+  APPROVAL_CONTEXT_MISMATCH: 409,
+  CONTEXT_CHANGED: 409,
+  SIGNAL_SIGNATURE_INVALID: 403,
+  SIGNAL_KEY_UNKNOWN: 403,
+  SIGNAL_SOURCE_NOT_ENROLLED: 403,
   POLICY_UNAVAILABLE: 503,
   SIGNAL_UNAVAILABLE: 503,
   ENFORCEMENT_UNAVAILABLE: 503,
   REPLAY_DETECTED: 409,
   IDEMPOTENCY_CONFLICT: 409,
   EVIDENCE_TAMPERED: 422,
+  AUTHORITY_INVARIANT_VIOLATION: 403,
+  EXECUTION_UNRESOLVED: 409,
   STATE_CONFLICT: 409,
   NOT_FOUND: 404,
   RATE_LIMITED: 429,
@@ -65,6 +111,10 @@ const DISCLOSABLE = new Set<ErrorCode>([
   'INVALID_REQUEST',
   'APPROVAL_REQUIRED',
   'DELEGATION_EXCEEDS_PARENT',
+  'INTENT_MISMATCH',
+  'APPROVAL_CONTEXT_MISMATCH',
+  'CONTEXT_CHANGED',
+  'AUTHORITY_CONSUMED',
   'REPLAY_DETECTED',
   'IDEMPOTENCY_CONFLICT',
   'STATE_CONFLICT',
@@ -147,7 +197,21 @@ const GENERIC_MESSAGES: Record<ErrorCode, string> = {
   AUTHORITY_REVOKED: 'The authority for this action has been revoked.',
   AUTHORITY_SUSPENDED: 'The authority for this action is suspended.',
   CONSTRAINT_VIOLATION: 'The action falls outside the constraints of the held authority.',
+  AUTHORITY_CONSUMED: 'This single-use authority has already been spent.',
   DELEGATION_EXCEEDS_PARENT: 'The delegated authority exceeds the authority of its parent.',
+  INTENT_MISMATCH: 'The attempted action falls outside the declared intent.',
+  APPROVAL_CONTEXT_MISMATCH:
+    'The conditions changed since this action was approved. It must be re-evaluated and re-approved.',
+  CONTEXT_CHANGED:
+    'The conditions changed since this action was authorised. It must be re-evaluated.',
+  AUTHORITY_INVARIANT_VIOLATION:
+    'This request was refused because an authority invariant did not hold. It has been recorded for review.',
+  EXECUTION_UNRESOLVED:
+    'A previous execution against this authorization has not been resolved. It must be reconciled against the provider before anything further is attempted.',
+  SIGNAL_SIGNATURE_INVALID: 'The signal signature did not verify.',
+  SIGNAL_KEY_UNKNOWN: 'No active signing key matches this signal.',
+  SIGNAL_SOURCE_NOT_ENROLLED:
+    'This signal source is not enrolled. A source must register a signing key before its signals are accepted.',
   POLICY_UNAVAILABLE: 'The policy could not be evaluated.',
   SIGNAL_UNAVAILABLE: 'Required risk signals could not be read.',
   ENFORCEMENT_UNAVAILABLE: 'The enforcement plane is unavailable.',

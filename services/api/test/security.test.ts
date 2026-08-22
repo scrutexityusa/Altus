@@ -775,3 +775,386 @@ describe('hostile input', () => {
     expect(response.body.error.message).toBe('Not found.');
   });
 });
+
+/**
+ * ============================================================================
+ * Read authorization.
+ * ============================================================================
+ *
+ * The `read` scope was declared, granted by the seed, and checked by nothing.
+ * Eleven GET routes were open to any authenticated principal in the tenant,
+ * which meant an agent credential could fetch the policy document governing it
+ * and the security-event log recording its own attacks.
+ *
+ * These tests are the enforcement. A scope that is never asserted against is
+ * worse than an absent one: it reads as a control in every review.
+ */
+describe('an agent cannot read the control plane', () => {
+  const forbidden = [
+    ['the policy document that governs it', '/v1/policy-versions'],
+    ['the security event log', '/v1/security-events'],
+    ['signing key metadata', '/v1/signal-keys'],
+    ['the agent register', '/v1/agents'],
+    ['the operator overview', '/v1/overview'],
+    ['the approval queue', '/v1/approval-requests'],
+    ['unresolved executions', '/v1/executions/unresolved'],
+  ] as const;
+
+  for (const [what, path] of forbidden) {
+    it(`is refused ${what}`, async () => {
+      const response = await h.call('GET', path, h.tenant.tokens['treasury_agent']!);
+      expect(response.status, `${path} was readable by an agent`).toBe(403);
+    });
+  }
+
+  it('lets a human operator read all of them', async () => {
+    // The gate must not be so tight that the people who need the evidence
+    // cannot reach it -- a control nobody can operate gets turned off.
+    for (const [, path] of forbidden) {
+      const response = await h.call('GET', path, h.tenant.tokens['admin']!);
+      expect(response.status, `${path} was not readable by an operator`).toBe(200);
+    }
+  });
+
+  it('never leaks the policy document through a refusal', async () => {
+    const response = await h.call('GET', '/v1/policy-versions', h.tenant.tokens['treasury_agent']!);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain('max_amount');
+    expect(body).not.toContain('escalate');
+  });
+});
+
+describe('an agent cannot read another agent’s records', () => {
+  /** A decision belonging to treasury-agent, and one belonging to verification. */
+  async function treasuryDecision() {
+    await issueTreasuryLease(h);
+    const decision = await h.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      h.tenant.tokens['treasury_agent']!,
+      wireRequest({ nonce: `readauthz-${Math.random().toString(36).slice(2, 10)}` }),
+    );
+    expect(decision.body.decision).toBe('ALLOW');
+    return decision.body;
+  }
+
+  it('is refused another agent’s decision', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/authorization-decisions/${decision.decision_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    // NOT_FOUND rather than FORBIDDEN: a 403 confirms the record exists, which
+    // turns the endpoint into an oracle for sweeping another agent's activity.
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s trace, the richest read in the API', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s receipt', async () => {
+    const decision = await treasuryDecision();
+    const stolen = await h.call(
+      'GET',
+      `/v1/receipts/${decision.receipt_id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('is refused another agent’s lease', async () => {
+    const lease = await issueTreasuryLease(h);
+    const stolen = await h.call(
+      'GET',
+      `/v1/authority-leases/${lease.id}`,
+      h.tenant.tokens['verification_agent']!,
+    );
+    expect(stolen.status).toBe(404);
+  });
+
+  it('can still read its own decision and trace', async () => {
+    const decision = await treasuryDecision();
+    const own = await h.call(
+      'GET',
+      `/v1/authorization-decisions/${decision.decision_id}`,
+      h.tenant.tokens['treasury_agent']!,
+    );
+    expect(own.status).toBe(200);
+    const trace = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['treasury_agent']!,
+    );
+    expect(trace.status).toBe(200);
+  });
+
+  it('does not narrow a human investigating across agents', async () => {
+    // An operator responding to an incident has to read every agent's
+    // records. Subject scoping applies to agents only.
+    const decision = await treasuryDecision();
+    const asOperator = await h.call(
+      'GET',
+      `/v1/trace/${decision.decision_id}`,
+      h.tenant.tokens['treasurer']!,
+    );
+    expect(asOperator.status).toBe(200);
+  });
+});
+
+describe('the authority invariants are enforced at runtime', () => {
+  /**
+   * The evaluator uses the containment lattice to derive its answer. These
+   * tests corrupt the stored authority *behind* the evaluator, so the lattice
+   * it derives from is already wrong, and assert the postcondition catches it.
+   *
+   * This is the case a derivation-only system misses completely: every code
+   * path behaves correctly and the answer is still unlawful.
+   */
+  async function delegatedChain() {
+    const parent = await issueTreasuryLease(h);
+    const delegation = await h.call('POST', '/v1/delegations', h.tenant.tokens['treasury_agent']!, {
+      issuer_agent_id: h.tenant.agents['treasury'],
+      delegate_agent_id: 'verification-agent',
+      parent_lease_id: parent.id,
+      grant: {
+        actions: ['counterparty.read'],
+        resources: { counterparty: ['cp_100'] },
+        constraints: {
+          max_amount: { currency: 'USD', amountMinor: '0' },
+          currencies: ['USD'],
+          allowed_counterparties: ['cp_100'],
+        },
+      },
+      ttl_seconds: 3600,
+    });
+    expect(delegation.status, JSON.stringify(delegation.body)).toBe(201);
+    return { parent, child: delegation.body.child_lease };
+  }
+
+  const readAsDelegate = (leaseId: string, nonce: string) =>
+    h.call('POST', '/v1/authorization/evaluate', h.tenant.tokens['verification_agent']!, {
+      agent_id: 'verification-agent',
+      action: 'counterparty.read',
+      resource: { type: 'counterparty', id: 'cp_100' },
+      context: { counterparty_id: 'cp_100' },
+      authority_lease_id: leaseId,
+      nonce,
+    });
+
+  it('refuses an ALLOW when a child grant exceeds its parent', async () => {
+    const { child } = await delegatedChain();
+
+    // wire.modify is not in the parent's grant, so this child now claims
+    // authority its parent never held. The delegation API refused to create
+    // it; write it anyway, the way a bug or a compromised database would.
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.authority_leases
+            SET actions = ARRAY['wire.modify','counterparty.read']
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+
+    const result = await readAsDelegate(child.id, 'invariant-child-exceeds');
+    expect(result.status).toBe(403);
+    expect(result.body.error.code).toBe('AUTHORITY_INVARIANT_VIOLATION');
+  });
+
+  it('records a security event that survives the refused transaction', async () => {
+    let events: Record<string, unknown>[] = [];
+    await asOwner(async (client) => {
+      const rows = await client.query(
+        `SELECT kind, subject_id, detail FROM scrutexity.security_events
+          WHERE kind = 'AUTHORITY_INVARIANT_VIOLATION' ORDER BY created_at DESC`,
+      );
+      events = rows.rows as Record<string, unknown>[];
+    });
+    expect(events.length, 'the violation rolled back its own evidence').toBeGreaterThan(0);
+    const detail = events[0]!['detail'] as { failed: string[] };
+    expect(detail.failed).toContain('CHILD_SUBSET_OF_PARENT');
+  });
+
+  it('never tells the caller which law broke', async () => {
+    // A principal that can probe which invariant it tripped can map the
+    // authority graph by watching which of its requests fail how.
+    const { child } = await delegatedChain();
+    await asOwner(async (client) => {
+      await client.query(
+        // Keeps counterparty.read so the request still reaches an ALLOW --
+        // the postcondition runs on ALLOW, and a DENY needs no re-checking.
+        `UPDATE scrutexity.authority_leases
+            SET actions = ARRAY['wire.modify','counterparty.read']
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+    const result = await readAsDelegate(child.id, 'invariant-no-leak');
+    const body = JSON.stringify(result.body);
+    expect(body).not.toContain('CHILD_SUBSET_OF_PARENT');
+    expect(body).not.toContain('lease_');
+  });
+
+  it('does not report a violation as an ordinary policy denial', async () => {
+    const { child } = await delegatedChain();
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.authority_leases
+            SET resources = '{"counterparty":["*"],"bank_account":["*"]}'::jsonb
+          WHERE id = $1`,
+        [child.id],
+      );
+    });
+
+    const result = await readAsDelegate(child.id, 'invariant-not-a-denial');
+    // POLICY_DENIED is ordinary and an operator sees it all day. This is not
+    // that, and must not be filed as that.
+    expect(result.body.error.code).not.toBe('POLICY_DENIED');
+    expect(result.body.error.code).toBe('AUTHORITY_INVARIANT_VIOLATION');
+    expect(result.body.decision).toBeUndefined();
+  });
+
+  it('leaves a lawful chain completely unaffected', async () => {
+    const { child } = await delegatedChain();
+    const result = await readAsDelegate(child.id, 'invariant-lawful');
+    expect(result.status).toBe(200);
+    expect(result.body.decision).toBe('ALLOW');
+  });
+});
+
+/**
+ * ============================================================================
+ * Issuable authority — the top of the theorem.
+ * ============================================================================
+ *
+ * Containment guarantees a delegated grant never exceeds its parent. A root
+ * lease has no parent, so before the issuance ceiling existed the whole chain
+ * hung beneath an unbounded root: `leases:write` alone could mint anything.
+ *
+ * These tests are all about what a *legitimate* credential cannot do. The
+ * attacker here is not an outsider — it is a valid human credential reaching
+ * past the authority its role actually carries.
+ */
+describe('issuance is bounded by the role, not by the scope', () => {
+  const issue = (token: string, grant: Record<string, unknown>) =>
+    h.call('POST', '/v1/authority-leases', token, {
+      agent_id: 'treasury-agent',
+      grant,
+      ttl_seconds: 3600,
+    });
+
+  const payingGrant = {
+    actions: ['wire.execute'],
+    resources: { bank_account: ['acct_001'] },
+    constraints: {
+      max_amount: { currency: 'USD', amount: '10000.00' },
+      currencies: ['USD'],
+      allowed_counterparties: ['cp_100'],
+    },
+  };
+
+  it('lets treasury_admin issue within its ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, payingGrant);
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+  });
+
+  it('refuses a treasurer trying to mint a paying agent', async () => {
+    // The treasurer holds `leases:write`, so this is not a scope refusal --
+    // the endpoint opens for them. It is the ceiling that stops them: their
+    // role may provision read-only agents and nothing that moves money.
+    //
+    // This is the whole argument for separating the two. A compromised
+    // treasurer credential cannot mint an agent that pays.
+    const response = await issue(h.tenant.tokens['treasurer']!, payingGrant);
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('lets that same treasurer issue the read-only authority their role carries', async () => {
+    // A ceiling that refuses everything is not a control, it is an outage.
+    const response = await issue(h.tenant.tokens['treasurer']!, {
+      actions: ['counterparty.read', 'account.read'],
+      resources: { counterparty: ['cp_100'], bank_account: ['acct_001'] },
+      constraints: {
+        max_amount: { currency: 'USD', amount: '0.00' },
+        currencies: ['USD'],
+        allowed_counterparties: ['cp_100'],
+      },
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+  });
+
+  it('refuses an amount above the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      constraints: {
+        ...payingGrant.constraints,
+        max_amount: { currency: 'USD', amount: '5000000.00' },
+      },
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses an action outside the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      actions: ['wire.modify'],
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses a resource outside the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['acct_999'] },
+    });
+    expect(response.status).toBe(422);
+    expect(response.body.error.reason_code).toBe('EXCEEDS_ISSUANCE_CEILING');
+  });
+
+  it('refuses a wildcard that would swallow the ceiling', async () => {
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['*'] },
+    });
+    expect(response.status).toBe(422);
+  });
+
+  it('names the axis that failed but not the ceiling itself', async () => {
+    // Enough for an operator to correct the request; not enough to map the
+    // organisation's authority model by probing it.
+    const response = await issue(h.tenant.tokens['admin']!, {
+      ...payingGrant,
+      resources: { bank_account: ['acct_999'] },
+    });
+    const body = JSON.stringify(response.body);
+    expect(body).toContain('resources');
+    expect(body).not.toContain('acct_001');
+    expect(body).not.toContain('500000');
+  });
+
+  it('records a security event for the attempt', async () => {
+    let events: Record<string, unknown>[] = [];
+    await asOwner(async (client) => {
+      const rows = await client.query(
+        `SELECT subject_id, detail FROM scrutexity.security_events
+          WHERE kind = 'ISSUANCE_EXCEEDS_CEILING' ORDER BY created_at DESC`,
+      );
+      events = rows.rows as Record<string, unknown>[];
+    });
+    expect(events.length, 'the refusal rolled back its own evidence').toBeGreaterThan(0);
+    const detail = events[0]!['detail'] as { issuer_roles: string[]; axes: string[] };
+    expect(detail.issuer_roles).toContain('treasury_admin');
+    expect(detail.axes.length).toBeGreaterThan(0);
+  });
+});

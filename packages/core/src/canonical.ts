@@ -16,6 +16,24 @@ import { createHash } from 'node:crypto';
  *     0.1 + 0.2 has no place in an audit record.
  *   - bigint is serialised as its decimal string
  *   - Date is serialised as an ISO-8601 UTC string with millisecond precision
+ *   - strings -- both keys and values -- are normalised to Unicode NFC
+ *
+ * The NFC rule is a departure from JCS, which deliberately leaves strings
+ * alone, and it exists because this hash is a security control rather than an
+ * interchange format. "Jose\u0301" and "Jos\u00e9" render identically in
+ * every interface a human or a bank will ever see, and without normalisation
+ * they produce different hashes -- which means an operation could be approved
+ * under one spelling and executed under the other. NFC composes them to the
+ * same bytes.
+ *
+ * NFKC is deliberately *not* used. NFKC is lossy by design: it folds U+2460
+ * CIRCLED DIGIT ONE to "1" and full-width forms to ASCII, so two genuinely
+ * different account references could collide into one hash. A control that
+ * merges distinct operations is worse than no control. NFC only composes
+ * sequences that are already canonically equivalent.
+ *
+ * NFC is the identity function on ASCII, so nothing in an ASCII-only corpus
+ * changes shape.
  */
 export function canonicalize(value: unknown): string {
   const out = encode(value);
@@ -40,7 +58,7 @@ function encode(value: unknown): string | undefined {
     case 'bigint':
       return JSON.stringify(value.toString());
     case 'string':
-      return JSON.stringify(value);
+      return JSON.stringify(value.normalize('NFC'));
     case 'number':
       if (!Number.isFinite(value)) {
         throw new CanonicalizationError(`non-finite number ${String(value)}`);
@@ -65,15 +83,40 @@ function encode(value: unknown): string | undefined {
     return JSON.stringify(value.toISOString());
   }
   if (Array.isArray(value)) {
-    return `[${value.map((item) => encode(item) ?? 'null').join(',')}]`;
+    // Indexed rather than `.map`, which preserves holes: a sparse array went
+    // through `.map` untouched and joined to `[1,,3]`, which is not JSON and
+    // which a second implementation could never reproduce. Reading by index
+    // yields `undefined` for a hole, which becomes null like any other
+    // unserialisable element, so positions never shift.
+    const parts: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      parts.push(encode(value[index]) ?? 'null');
+    }
+    return `[${parts.join(',')}]`;
   }
 
   const record = value as Record<string, unknown>;
   const parts: string[] = [];
-  for (const key of Object.keys(record).sort()) {
+  // Keys are normalised before they are sorted, so the ordering is over the
+  // same bytes that get emitted. Sorting first and normalising afterwards
+  // could emit a sequence that is no longer in order.
+  const keys = Object.keys(record)
+    .map((key) => [key.normalize('NFC'), key] as const)
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  let previous: string | undefined;
+  for (const [normalizedKey, key] of keys) {
+    // Two keys that differ only in normalisation collapse to one here. Which
+    // value would win depends on insertion order, and a canonical form that
+    // depends on insertion order is not canonical. Refuse rather than pick.
+    if (normalizedKey === previous) {
+      throw new CanonicalizationError(
+        `duplicate key ${JSON.stringify(normalizedKey)} after Unicode normalisation`,
+      );
+    }
+    previous = normalizedKey;
     const encoded = encode(record[key]);
     if (encoded === undefined) continue;
-    parts.push(`${JSON.stringify(key)}:${encoded}`);
+    parts.push(`${JSON.stringify(normalizedKey)}:${encoded}`);
   }
   return `{${parts.join(',')}}`;
 }

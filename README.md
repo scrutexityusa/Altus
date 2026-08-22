@@ -30,36 +30,47 @@ backed by real Postgres and asserts every outcome, so a broken demo fails the
 build.
 
 ```bash
-make api      # the control plane, with reload
-make web      # the dashboard
-make test     # 206 tests
-make ci       # everything CI runs
+make api          # the control plane, with reload
+make web          # the dashboard
+make test         # 554 tests
+make adversarial  # 11 security invariants, mounted as real attacks
+make recovery     # SIGKILL the API mid-payment; assert what survived
+make ci           # everything above
 ```
+
+`make adversarial` and `make recovery` are the two worth running if you are
+evaluating this rather than developing it. Neither is an alias for a subset of
+the unit tests: the first mounts real attacks through the public API against a
+real database, and the second destroys a real process between the execution
+claim and the payment, then proves a different process refuses to retry.
 
 ---
 
 ## What the demo shows
 
-| Scene | What happens                                                               | Outcome                           |
-| ----- | -------------------------------------------------------------------------- | --------------------------------- |
-| 1     | Two agents, each owned by a named human                                    | —                                 |
-| 2     | Scoped authority issued: `wire.*` on two accounts, $50,000 ceiling, 1h TTL | —                                 |
-| 3     | A $25,000 wire                                                             | **ALLOW**, single-use grant, 300s |
-| 3b    | The same grant presented twice                                             | **REPLAY_DETECTED**               |
-| 4     | A $250,000 wire — inside its role, beyond its discretion                   | **ESCALATE**, treasurer           |
-| 5     | The treasurer approves                                                     | **ALLOW**, superseding decision   |
-| 5b    | The CFO tries to approve the same request                                  | **STATE_CONFLICT**                |
-| 6     | Counterparty verification delegated to a second agent                      | depth 1, clamped TTL              |
-| 6b    | Delegating `wire.execute` as well                                          | **ACTION_NOT_DELEGABLE**          |
-| 7     | The delegated agent attempts `wire.modify`                                 | **DENY**, with a full explanation |
-| 8     | `fraud_risk = 0.97` arrives from an external engine                        | authority narrows                 |
-| 8b    | The same $25,000 wire that ran unattended a minute ago                     | **ESCALATE**                      |
-| 9     | The parent lease is revoked                                                | both agents refused, immediately  |
-| 10    | Evidence verified; then a tampered receipt                                 | **INTACT**, then **COMPROMISED**  |
+| Scene | What happens                                                               | Outcome                                    |
+| ----- | -------------------------------------------------------------------------- | ------------------------------------------ |
+| 1     | Two agents, each owned by a named human                                    | —                                          |
+| 2     | Scoped authority issued: `wire.*` on two accounts, $50,000 ceiling, 1h TTL | —                                          |
+| 3     | A $25,000 wire                                                             | **ALLOW**, single-use grant, 300s          |
+| 3b    | The same grant presented twice                                             | **REPLAY_DETECTED**                        |
+| 4     | A $75,000 wire — inside its role, beyond its discretion                    | **ESCALATE**, treasurer                    |
+| 5     | The treasurer approves                                                     | **ALLOW**, superseding decision            |
+| 5b    | The CFO tries to approve the same request                                  | **STATE_CONFLICT**                         |
+| 6     | Counterparty verification delegated to a second agent                      | depth 1, clamped TTL                       |
+| 6b    | Delegating `wire.execute` as well                                          | **ACTION_NOT_DELEGABLE**                   |
+| 7     | The delegated agent attempts `wire.modify`                                 | **DENY**, with a full explanation          |
+| 8     | The amount is mutated after authorization, at the execution boundary       | **INTENT_MISMATCH**, before the provider   |
+| 8b    | The operation it was actually authorized for                               | **EXECUTED**, hashes match                 |
+| 9     | `GET /v1/trace/{id}` on the approved wire                                  | causal chain back to the policy activation |
+| 10    | `fraud_risk = 0.97` arrives, signed, from an external engine               | authority narrows                          |
+| 10b   | The same $25,000 wire that ran unattended a minute ago                     | **ESCALATE**                               |
+| 11    | The parent lease is revoked                                                | both agents refused, immediately           |
+| 12    | Evidence verified; then a tampered receipt                                 | **INTACT**, then **COMPROMISED**           |
 
 ---
 
-## The three ideas
+## The five ideas
 
 ### 1. Authority is an object, not a boolean
 
@@ -91,7 +102,31 @@ A fraud signal narrows autonomy, never the envelope — which is why the same
 wire escalates rather than reading as a broken integration. See
 [ADR-0008](docs/decisions/0008-escalation-boundary.md).
 
-### 3. Decisions are pure, so evidence means something
+### 3. A refusal carries the next step
+
+A denial that only says "no" leaves an agent guessing, and guessing looks
+exactly like probing. So a refusal carries the next legitimate step —
+`REQUEST_DELEGATION` addressed to the agent that can grant it, `REQUEST_LEASE`
+with the minimal grant, `HUMAN_ESCALATION` with the approval already open.
+
+Computed by the policy engine from the same facts that produced the refusal,
+never generated. Hard violations return nothing, and payloads carry no
+threshold, rule id, or the value that would have passed — an agent cannot
+binary-search a policy by reading its own denials. See
+[ADR-0011](docs/decisions/0011-corrective-handshake.md).
+
+### 4. Every decision can be walked back to its origin
+
+`GET /v1/trace/{decision_id}` returns the causal chain, oldest cause first: the
+policy activation that admitted the authority, the lease it produced, the
+delegation that narrowed it, the request, the signals that were read, the
+humans who approved, the decision, and what was done with it. Each node carries
+a timestamp and a typed causal edge.
+
+A database traversal over a graph the schema has encoded since the first
+migration. Nothing summarised, nothing generated, same answer every time.
+
+### 5. Decisions are pure, so evidence means something
 
 `evaluateAuthorization(snapshot) → decision` reads no clock, opens no
 connection, consults no global. Everything it depends on arrives as data, and
@@ -113,10 +148,13 @@ packages/sdk      typed client and enforcement point
 services/api      HTTP surface, persistence, tenancy, idempotency, observability
 apps/web          dashboard over the API's own read model
 db/migrations     schema, row level security, append-only triggers
-policies/         the demonstration treasury pack
+policies/         the demonstration pack (treasury_wire) and the partner starter (treasury-wire)
 spec/             generated OpenAPI and policy JSON Schema, drift-checked in CI
 deploy/k8s        deployment and sidecar templates
 docs/             architecture, models, threat model, contract, ADRs
+docs/design-partner/  the evaluation package: security brief, demo script,
+                      API quickstart, policy pack, integration runbook,
+                      pilot plan, red team handoff
 ```
 
 ## Using it
@@ -148,14 +186,19 @@ be mistaken for a soft yes.
 
 ## Testing
 
-206 tests, and the ones that matter most are the invariants:
+290 tests. `./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with
+no build output and no dependencies installed.
+
+The ones that matter most are the invariants:
 
 ```
 child authority never exceeds parent authority     4,000 randomised proposals
 anything a child covers, its parent covers         3,000 randomised pairs
 authority decay only ever shrinks                  2,000 randomised restrictions
 no ALLOW without autonomous covering authority     2,000 randomised evaluations
-identical inputs produce identical decisions         300 randomised requests
+identical inputs produce identical decisions          300 randomised requests
+a signal can never move a decision towards yes         18 action/value pairs
+exactly one winner among ten concurrent claimants   a real race, real database
 ```
 
 The security suite runs the attacks from the threat model against the real

@@ -22,8 +22,11 @@ import {
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
   IngestSignalSchema,
+  ExecuteSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
+  RegisterSignalKeySchema,
+  RotateSignalKeySchema,
   RevokeLeaseSchema,
   SubmitApprovalSchema,
 } from '../services/api/src/schemas.js';
@@ -186,6 +189,49 @@ const AuthoredPolicy = z
       })
       .strict()
       .optional(),
+    issuance: z
+      .object({
+        enforced: z.boolean().default(true),
+        ceilings: z
+          .array(
+            z
+              .object({
+                role: z.string().min(1).max(64),
+                grant: z
+                  .object({
+                    actions: z.array(z.string()).min(1),
+                    resources: z.record(z.string(), z.array(z.string()).min(1)).default({}),
+                    constraints: z.record(z.string(), z.unknown()).default({}),
+                  })
+                  .strict(),
+              })
+              .strict(),
+          )
+          .max(50)
+          .default([]),
+      })
+      .strict()
+      .optional()
+      .describe(
+        'The ceiling each role may issue authority within. A role not named here may issue nothing.',
+      ),
+    intent: z.string().min(1).max(200).optional(),
+    allowed_actions: z.array(z.string()).optional(),
+    forbidden_actions: z.array(z.string()).optional(),
+    intents: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            description: z.string().optional(),
+            allowed_actions: z.array(z.string()).default([]),
+            forbidden_actions: z.array(z.string()).default([]),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
+    intent_required: z.boolean().optional(),
     rules: z.array(AuthoredRule).min(1).max(500),
   })
   .strict()
@@ -296,6 +342,31 @@ const DECISION_SCHEMA = {
         forbid_self_approval: { type: 'boolean' },
         ttl_seconds: { type: 'integer' },
       },
+    },
+    intent_evaluation: {
+      oneOf: [{ $ref: '#/components/schemas/IntentEvaluation' }, { type: 'null' }],
+    },
+    corrective_actions: {
+      type: 'array',
+      items: { $ref: '#/components/schemas/CorrectiveAction' },
+      description: 'Empty for an ALLOW, and empty for a hard violation.',
+    },
+    context_hash: {
+      type: ['string', 'null'],
+      description:
+        'Fingerprint of every input this decision rests on. Recomputed at execution; if it has moved, the action is refused rather than reconciled.',
+    },
+    exact_intent_hash: {
+      type: ['string', 'null'],
+      pattern: '^[0-9a-f]{64}$',
+      description:
+        'SHA-256 of the exact operation this ALLOW authorises, projected onto the action catalog. Answers "did the operation mutate?". Null unless the decision was ALLOW. Computed by the server from the request it evaluated; it is not an input, and a request that supplies one is rejected.',
+    },
+    binding_hash: {
+      type: ['string', 'null'],
+      pattern: '^[0-9a-f]{64}$',
+      description:
+        'SHA-256 of the operation together with the decision, lease, policy version and approved context that authorised it. Answers "is this operation bound to this authority decision?". A replay of a genuine, unmutated operation under a different decision matches exact_intent_hash and fails this. Null unless the decision was ALLOW.',
     },
     failover_behavior: { type: 'string', enum: ['FAIL_OPEN', 'FAIL_CLOSED', 'ESCALATE'] },
     expires_at: {
@@ -450,6 +521,7 @@ function buildOpenApi(): unknown {
         IngestSignalRequest: jsonSchema(IngestSignalSchema, 'IngestSignalRequest'),
         SubmitApprovalRequest: jsonSchema(SubmitApprovalSchema, 'SubmitApprovalRequest'),
         RecordExecutionRequest: jsonSchema(RecordExecutionSchema, 'RecordExecutionRequest'),
+        ExecuteRequest: jsonSchema(ExecuteSchema, 'ExecuteRequest'),
         CreatePolicyVersionRequest: jsonSchema(
           CreatePolicyVersionSchema,
           'CreatePolicyVersionRequest',
@@ -592,6 +664,8 @@ function buildOpenApi(): unknown {
         get: {
           tags: ['Authority'],
           summary: 'Read a lease and its full ancestry',
+          description:
+            'Returns `status` (the stored disposition) alongside `effective_status` (what an authorization decision would conclude right now, on the database clock). They differ for a lease that has simply run out of time: nothing rewrites rows when a clock passes them, so `status` still reads ACTIVE while `effective_status` reads EXPIRED. Read the second one to know whether the authority is usable.',
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             '200': jsonResponse('Lease and ancestry.', { type: 'object' }),
@@ -691,6 +765,57 @@ function buildOpenApi(): unknown {
                 explanation: { $ref: '#/components/schemas/Explanation' },
               },
             }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/execute': {
+        post: {
+          tags: ['Execution'],
+          summary: 'Execute the exact operation an ALLOW authorised',
+          description:
+            'The enforcement boundary. The caller presents the operation it believes it is about to perform; Scrutexity canonicalises it, recomputes both the intent hash and the binding hash, checks the authority is still live, claims execution rights atomically, and only then calls the provider under a key derived from the grant. A mutated operation is refused before the external system is contacted, and the refusal is recorded as a security event that survives the rolled-back transaction. This is the only path on which Scrutexity performs the operation itself.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/ExecuteRequest' }),
+          responses: {
+            '200': jsonResponse(
+              'The recorded outcome of an earlier execution against this authorization. `replayed` is true, nothing was created, and the provider was not called again. A client retrying after a network failure gets its answer here rather than a second payment.',
+              { type: 'object' },
+            ),
+            '201': jsonResponse(
+              'The operation was executed, or the provider reported a definite failure, or the provider did not answer. Read `status`: EXECUTED, FAILED or UNKNOWN. UNKNOWN is never reported as FAILED -- "the wire did not go" and "I do not know whether the wire went" call for opposite responses.',
+              { type: 'object' },
+            ),
+            // Spread first, so the descriptions below replace the generic ones
+            // rather than being silently overwritten by them.
+            ...ERROR_RESPONSES,
+            '403': jsonResponse(
+              'The operation does not match the one that was authorised (INTENT_MISMATCH, with the diverging field names in `details.mutated_fields`), the authority behind it is revoked or expired, or the decision belongs to another agent. The external system was not contacted.',
+              { $ref: '#/components/schemas/Error' },
+            ),
+            '409': jsonResponse(
+              'EXECUTION_UNRESOLVED: an execution against this authorization is in flight, or reached the provider and was interrupted before its outcome was recorded. It must be reconciled -- see GET /v1/executions/unresolved -- and resubmitted under the same idempotency key. This is deliberately not REPLAY_DETECTED: a replay means "already done", this means "may or may not have been done".',
+              { $ref: '#/components/schemas/Error' },
+            ),
+          },
+        },
+      },
+      '/v1/executions/unresolved': {
+        get: {
+          tags: ['Execution'],
+          summary: 'Execution claims that were started and never settled',
+          description:
+            'A claim is EXECUTING while a provider call is in flight and UNKNOWN when the provider did not answer. Either state means authority was spent and this system does not know what happened at the other end; only the external system can settle it. Each row carries the idempotency key the provider was called under, which is what a reconciliation job must ask the provider about. Pass `older_than_seconds` to exclude claims that are simply still in progress.',
+          parameters: [
+            {
+              name: 'older_than_seconds',
+              in: 'query',
+              required: false,
+              schema: { type: 'integer', minimum: 0, maximum: 86400 },
+            },
+          ],
+          responses: {
+            '200': jsonResponse('Unresolved claims, oldest first.', { type: 'object' }),
             ...ERROR_RESPONSES,
           },
         },
@@ -845,6 +970,104 @@ function buildOpenApi(): unknown {
           parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
           responses: {
             '200': jsonResponse('The version is now active.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/trace/{id}': {
+        get: {
+          tags: ['Evidence'],
+          summary: 'Root-cause trace: where the authority behind a decision came from',
+          description: [
+            'Walks backwards from a decision to its origin and returns the chain in causal',
+            'order, oldest cause first -- policy activation, the authority it admitted, any',
+            'delegation, the request, the signals that were read, the humans who approved,',
+            'the decision, and what was done with it. Each node carries a timestamp and the',
+            'causal edge that produced the next one. A database traversal: deterministic,',
+            'replayable, and never summarised.',
+          ].join(' '),
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Decision id.',
+            },
+          ],
+          responses: {
+            '200': jsonResponse('The causal chain.', {
+              type: 'object',
+              properties: {
+                decision_id: { type: 'string' },
+                root_cause: { $ref: '#/components/schemas/TraceNode' },
+                trace: { type: 'array', items: { $ref: '#/components/schemas/TraceNode' } },
+                complete: {
+                  type: 'boolean',
+                  description:
+                    'True when the chain reaches a policy activation rather than stopping short.',
+                },
+              },
+            }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Register a signing key for a signal source',
+          description:
+            'Ed25519 is preferred: only the public key is stored, so a database disclosure yields nothing an attacker can sign with. Key material is never echoed back.',
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/RegisterSignalKeyRequest' }),
+          responses: {
+            '201': jsonResponse('The key was registered.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+        get: {
+          tags: ['Signals'],
+          summary: 'List signing keys and their rotation state',
+          responses: {
+            '200': jsonResponse('Signing keys.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys/{id}/retire': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Retire a key with a grace period',
+          description:
+            'The outgoing key stays valid for the grace period so the source can switch over without dropping signals. Use revoke instead when a key is believed compromised.',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: jsonBody({ $ref: '#/components/schemas/RotateSignalKeyRequest' }),
+          responses: {
+            '200': jsonResponse('The key is retiring.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/signal-keys/{id}/revoke': {
+        post: {
+          tags: ['Signals'],
+          summary: 'Revoke a key immediately, with no grace period',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': jsonResponse('The key was revoked.', { type: 'object' }),
+            ...ERROR_RESPONSES,
+          },
+        },
+      },
+      '/v1/security-events': {
+        get: {
+          tags: ['Operations'],
+          summary: 'Security events: rejected signatures, replays, key revocations',
+          description:
+            'Queryable without access to application logs, because an operator investigating a rejected signal should not need a shell on a production node.',
+          responses: {
+            '200': jsonResponse('Security events.', { type: 'object' }),
             ...ERROR_RESPONSES,
           },
         },

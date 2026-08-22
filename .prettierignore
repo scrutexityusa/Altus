@@ -4,3 +4,5 @@ dist
 node_modules
 spec/openapi.json
 spec/policy.schema.json
+# Generated, and its byte format is the cross-language conformance contract.
+test/canonicalization-vectors.json

@@ -33,6 +33,12 @@ export const AuthorizationRequestSchema = z
     context: z.record(z.string(), z.unknown()).default({}),
     /** Optional lease the caller wishes to act under. */
     authority_lease_id: z.string().optional(),
+    /**
+     * What the agent says it is doing. Bound against the intents the policy
+     * declares and against the purpose of any purpose-bound grant, producing
+     * INTENT_MISMATCH when the attempted action falls outside it.
+     */
+    declared_intent: z.string().min(1).max(128).optional(),
     /** Single-use value; reuse is REPLAY_DETECTED. */
     nonce: z.string().min(8).max(128).optional(),
     correlation_id: z.string().max(128).optional(),
@@ -45,6 +51,14 @@ export const CreateLeaseSchema = z
     grant: GrantSchema,
     ttl_seconds: z.number().int().min(30).max(2_592_000),
     revocable: z.boolean().default(true),
+    /**
+     * SINGLE_USE grants authorise exactly one action and are spent on use.
+     * REUSABLE is the default only for backward compatibility; single-use is
+     * the safer shape for high-consequence work.
+     */
+    grant_type: z.enum(['REUSABLE', 'SINGLE_USE']).default('REUSABLE'),
+    /** Objective this authority is granted for; binds against declared intent. */
+    purpose: z.string().min(1).max(128).optional(),
     metadata: z.record(z.string(), z.unknown()).default({}),
   })
   .strict();
@@ -76,7 +90,40 @@ export const IngestSignalSchema = z
     source: z.string().min(1).max(128),
     ttl_seconds: z.number().int().min(1).max(86_400),
     issued_at: z.string().datetime().optional(),
+    /**
+     * Source-assigned unique id for this observation. Redelivering the same
+     * event id is refused as a replay, which is what stops a source pushing a
+     * stale low-risk reading over a current high-risk one.
+     */
+    event_id: z.string().min(1).max(128).optional(),
+    /** Base64url signature over the canonical signal envelope. */
+    signature: z.string().min(1).max(512).optional(),
+    /** Which of the source's keys signed it. */
+    signing_key_id: z.string().min(1).max(128).optional(),
     metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
+export const RegisterSignalKeySchema = z
+  .object({
+    source: z.string().min(1).max(128),
+    key_id: z.string().min(1).max(128),
+    algorithm: z.enum(['ED25519', 'HMAC_SHA256']),
+    /**
+     * Ed25519: an SPKI PEM public key -- preferred, because only the public
+     * half is stored. HMAC_SHA256: the shared secret, which is why it is the
+     * second choice.
+     */
+    key_material: z.string().min(32).max(4096),
+    not_before: z.string().datetime().optional(),
+    not_after: z.string().datetime().optional(),
+  })
+  .strict();
+
+export const RotateSignalKeySchema = z
+  .object({
+    /** Seconds the outgoing key stays valid so the source can switch over. */
+    grace_period_seconds: z.number().int().min(0).max(604_800).default(3600),
   })
   .strict();
 
@@ -93,6 +140,33 @@ export const RecordExecutionSchema = z
     decision_id: z.string().min(1),
     status: z.enum(['SUCCEEDED', 'FAILED']),
     result: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
+/**
+ * The enforced execution path.
+ *
+ * The caller presents the operation it believes it is about to perform. That
+ * is a claim, not an input: the boundary canonicalises it, hashes it, and
+ * compares it against the hash recorded when the grant was issued. A caller
+ * that changes anything -- an amount, a recipient, an account -- produces a
+ * mismatch and a security event rather than a wire.
+ *
+ * There is deliberately no status field. The caller does not report an
+ * outcome here; Scrutexity performs the operation and determines the outcome
+ * itself. A caller-reported outcome is what the legacy /v1/executions path
+ * accepts, and it is not enforcement.
+ */
+export const ExecuteSchema = z
+  .object({
+    decision_id: z.string().min(1),
+    operation: z
+      .object({
+        action: z.string().min(1).max(128),
+        resource: ResourceRefSchema,
+        context: z.record(z.string(), z.unknown()).default({}),
+      })
+      .strict(),
   })
   .strict();
 

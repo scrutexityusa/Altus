@@ -1,0 +1,63 @@
+{
+  "$comment": "The recovery conformance registry. Each entry is destroyed with a real SIGKILL against a real child process, not a simulated one: scripts/recovery.ts spawns the API, kills it at a chosen instant, starts a different process against the same database, and asserts what survived. Adding a scenario here without implementing it fails the run. The adversarial suite's A9 and A10 assert the same invariants against rewound state, which is faster and proves the recovery logic given a state; these prove a real crash produces that state.",
+  "version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "R1",
+      "title": "SIGKILL after the claim, before the payment",
+      "threat": "A crash between committing the execution claim and the money moving leaves authority spendable again.",
+      "precondition": "A single-use grant, an ALLOW, and a provider that records its arrival to its own committed ledger and then blocks forever.",
+      "attack": "Wait until the provider's ledger shows the request arrived, SIGKILL the whole process group, start a different process against the same database, and retry.",
+      "expected_invariant": "409 EXECUTION_UNRESOLVED. The provider is not contacted again, its ledger is unchanged, the grant is still consumed, the original idempotency key is preserved, and the claim is listed for reconciliation.",
+      "cases": [
+        "claim committed and externally visible before the provider was reached",
+        "grant consumed in the same transaction as the claim",
+        "retry refused as unresolved",
+        "provider not contacted a second time",
+        "no money moved",
+        "idempotency key preserved",
+        "surfaced for reconciliation"
+      ],
+      "crash_point": "before_payment",
+      "invariant_ids": ["INV-006", "INV-010"],
+      "gap": "G-16"
+    },
+    {
+      "scenario_id": "R2",
+      "title": "SIGKILL after the payment, before settlement",
+      "threat": "The money moved and the record of it did not. A retry pays twice.",
+      "precondition": "The same, with a provider that records the payment to its own committed ledger before blocking.",
+      "attack": "Wait until the ledger shows EXECUTED, SIGKILL the process group, restart, and retry.",
+      "expected_invariant": "409 EXECUTION_UNRESOLVED -- never REPLAY_DETECTED, which would tell the caller the work is finished, and never a fresh execution. Scrutexity cannot distinguish this from R1 from its own records, and must not try: both answers are the same because the correct action is the same.",
+      "cases": [
+        "money confirmed moved in the provider's own ledger",
+        "retry refused as unresolved",
+        "provider not contacted a second time",
+        "external state unchanged by the refused retry",
+        "grant still consumed",
+        "idempotency key preserved so reconciliation asks about the same payment",
+        "surfaced for reconciliation"
+      ],
+      "crash_point": "after_payment",
+      "invariant_ids": ["INV-006", "INV-010"],
+      "gap": "G-16"
+    },
+    {
+      "scenario_id": "R3",
+      "title": "Control: no kill, the same path settles",
+      "threat": "The harness proves nothing if the path it kills never worked in the first place.",
+      "precondition": "The same setup with the provider configured not to block.",
+      "attack": "Execute normally, then retry against the settled claim.",
+      "expected_invariant": "201 EXECUTED, then 200 with replayed: true. The provider is contacted exactly once. A settled claim replays its outcome, so the 409s in R1 and R2 are the crash state speaking rather than a blanket refusal to retry.",
+      "cases": [
+        "uninterrupted execution completes",
+        "claim settles as EXECUTED",
+        "retry replays rather than refusing",
+        "provider contacted once"
+      ],
+      "crash_point": "none",
+      "invariant_ids": ["INV-006"],
+      "gap": null
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ScrutexityError, newId } from '@scrutexity/core';
+import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
 import type { Database, PoolClient } from './db/pool.js';
+import { securityNow } from './db/security-clock.js';
 
 /**
  * Bearer credentials for machine and human principals.
@@ -48,20 +49,26 @@ export async function authenticate(db: Database, header: string | undefined): Pr
   if (!match) throw UNAUTHORIZED();
 
   const [, prefix] = match;
-  const row = await db.withoutTenant(async (client: PoolClient) => {
+  // The credential row and the instant it is judged against are read on the
+  // same connection, in the same transaction, so an API node's clock cannot
+  // keep an expired credential alive or kill a live one.
+  const { row, now } = await db.withoutTenant(async (client: PoolClient) => {
     const result = await client.query('SELECT * FROM scrutexity.resolve_credential($1)', [prefix]);
-    return result.rows[0] as
-      | {
-          id: string;
-          organization_id: string;
-          principal_type: Principal['type'];
-          principal_id: string;
-          token_hash: Buffer;
-          scopes: string[];
-          status: 'ACTIVE' | 'REVOKED';
-          expires_at: Date | null;
-        }
-      | undefined;
+    return {
+      now: await securityNow(client),
+      row: result.rows[0] as
+        | {
+            id: string;
+            organization_id: string;
+            principal_type: Principal['type'];
+            principal_id: string;
+            token_hash: Buffer;
+            scopes: string[];
+            status: 'ACTIVE' | 'REVOKED';
+            expires_at: Date | null;
+          }
+        | undefined,
+    };
   });
 
   // Hash the supplied token regardless of whether a row was found, so a
@@ -72,7 +79,7 @@ export async function authenticate(db: Database, header: string | undefined): Pr
 
   if (!row || !matches) throw UNAUTHORIZED();
   if (row.status !== 'ACTIVE') throw UNAUTHORIZED();
-  if (row.expires_at && row.expires_at.getTime() <= Date.now()) throw UNAUTHORIZED();
+  if (row.expires_at && isExpired(row.expires_at, now)) throw UNAUTHORIZED();
 
   return {
     credential_id: row.id,
@@ -84,9 +91,19 @@ export async function authenticate(db: Database, header: string | undefined): Pr
 }
 
 /**
- * Scope check. Agent credentials deliberately cannot administer the control
- * plane: an agent may ask whether it is authorized, but it may not write the
- * policy that answers, issue itself a lease, or approve its own escalation.
+ * Scope check.
+ *
+ * Agent credentials cannot administer the control plane -- an agent may ask
+ * whether it is authorized, but it may not write the policy that answers,
+ * issue itself a lease, or approve its own escalation -- and cannot *read* it
+ * either. That second half was untrue until the `audit` scope existed: `read`
+ * was granted and never asserted against, so an agent could fetch the policy
+ * document governing it and the security-event log recording its own attacks.
+ *
+ * A comment is not a control. What makes the sentence above true is
+ * `requireOperatorRead` on every operator route and `assertMayReadSubject` on
+ * every per-resource read, each with an adversarial test in
+ * services/api/test/security.test.ts.
  */
 export const SCOPES = {
   authorize: 'authorization:evaluate',
@@ -96,13 +113,44 @@ export const SCOPES = {
   approve: 'approvals:write',
   policyWrite: 'policies:write',
   adminWrite: 'admin:write',
+  /**
+   * Ordinary reads: an agent's own decisions, leases, traces and receipts.
+   * Held by everyone, including agents.
+   */
   read: 'read',
+  /**
+   * Operator reads: the policy documents themselves, the security event log,
+   * signing key metadata, the agent register, unresolved executions.
+   *
+   * A separate scope from `read` because an agent must never hold it. Refusals
+   * are written carefully not to leak policy internals and the corrective
+   * handshake is deliberately narrow -- all of which is defeated if the agent
+   * can simply fetch the policy that governs it. The security event log is
+   * worse: it is the forensic record of attacks, including that agent's own.
+   */
+  audit: 'audit:read',
 } as const;
 
 export function requireScope(principal: Principal, scope: string): void {
   if (!principal.scopes.includes(scope)) {
     throw new ScrutexityError('FORBIDDEN', `credential lacks the "${scope}" scope`, {
       internal: { principal: principal.id, scope, held: principal.scopes },
+    });
+  }
+}
+
+/**
+ * Refuses an agent principal.
+ *
+ * Distinct from `requireHuman`: a service credential (a fraud engine, a
+ * reconciliation job) is a legitimate caller for operator-facing reads, but an
+ * agent under policy never is. The thing being kept out is the principal whose
+ * behaviour the control plane exists to constrain.
+ */
+export function requireNonAgent(principal: Principal): void {
+  if (principal.type === 'agent') {
+    throw new ScrutexityError('FORBIDDEN', 'agent credentials may not read the control plane', {
+      internal: { principal: principal.id, principal_type: principal.type },
     });
   }
 }

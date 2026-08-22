@@ -13,10 +13,87 @@ const ConfigSchema = z.object({
   DATABASE_URL: z.string().min(1),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(200).default(10),
   RECEIPT_SIGNING_KEY_ID: z.string().min(1).default('dev-local-1'),
-  /** Base64-encoded PKCS#8 PEM of an Ed25519 private key. */
+  /**
+   * Base64-encoded PKCS#8 PEM of an Ed25519 private key.
+   *
+   * Read through the secret provider, not directly: with SECRET_PROVIDER=env
+   * this is the environment variable, with `file` it is the file of that name
+   * under SECRET_DIR, and with `kms` it is the name the key manager knows the
+   * key by. One name, three custody models, and nothing downstream can tell
+   * which one it got.
+   */
+  RECEIPT_SIGNING_KEY_NAME: z.string().min(1).default('RECEIPT_SIGNING_KEY_B64'),
   RECEIPT_SIGNING_KEY_B64: z.string().default(''),
   EXECUTION_GRANT_TTL_SECONDS: z.coerce.number().int().min(5).max(86_400).default(300),
   APPROVAL_TTL_SECONDS: z.coerce.number().int().min(30).max(86_400).default(3600),
+  /**
+   * Comma-separated execution providers, or "none".
+   *
+   * The default is the simulated provider, which is right for development and
+   * refused outright in production -- a simulated provider there would emit
+   * receipts indistinguishable from real ones for money that never moved.
+   */
+  EXECUTION_PROVIDERS: z.string().default('simulated-treasury'),
+  /**
+   * Whether a signal from a source with no enrolled key may influence
+   * authority.
+   *
+   *   required    an unenrolled source is refused. The default.
+   *   permissive  an unenrolled source is accepted and recorded as
+   *               unauthenticated. Local development only.
+   *
+   * The default used to be permissive by omission -- there was no setting, and
+   * an unenrolled source was simply treated as non-fatal. That meant anyone
+   * holding the `signals:write` scope could assert any signal about any
+   * subject, and the signal plane reduces authority over real money.
+   *
+   * Production cannot select `permissive`; `loadConfig` refuses to start.
+   */
+  /**
+   * Connection string and stopping point for the crash-harness provider.
+   *
+   * Only read when EXECUTION_PROVIDERS names it, which production refuses. The
+   * separate connection string is the point: the harness provider's ledger has
+   * to be writable by something other than the tenant-scoped application role,
+   * and it has to survive the process being killed.
+   */
+  CRASH_HARNESS_URL: z.string().default(''),
+  CRASH_HARNESS_POINT: z.enum(['before_payment', 'after_payment', 'none']).default('none'),
+  SIGNAL_AUTHENTICATION: z.enum(['required', 'permissive']).default('required'),
+  /**
+   * Whether HMAC-SHA256 signal keys are usable at all.
+   *
+   *   refused    HMAC keys cannot be registered and enrolled HMAC keys do not
+   *              verify. The default, everywhere.
+   *   permitted  HMAC keys work, for a deployment still migrating a source
+   *              that cannot yet manage a keypair.
+   *
+   * Ed25519 stores only a public key, so a disclosure of this database yields
+   * nothing an attacker can sign with. HMAC requires Scrutexity to hold the
+   * same secret that manufactures signals reducing authority over real money,
+   * which makes the signal key table a forgery capability.
+   *
+   * The default is `refused` in development too, and not only in production,
+   * for two reasons: a fallback that exists locally is a fallback the tests
+   * exercise and production does not, and a deployment discovers a missing
+   * capability at enrolment rather than in an incident. Production cannot
+   * select `permitted`.
+   */
+  SIGNAL_LEGACY_HMAC: z.enum(['refused', 'permitted']).default('refused'),
+  /**
+   * Where private key material comes from.
+   *
+   *   env   read from the environment. Fine locally, and the only provider
+   *         that needs no external system.
+   *   file  read from a path, so a secret can be mounted rather than exported
+   *         into a process environment that `ps` and crash dumps can see.
+   *   kms   fetched from a key manager. The only provider production accepts.
+   *
+   * See services/api/src/keys/provider.ts.
+   */
+  SECRET_PROVIDER: z.enum(['env', 'file', 'kms']).default('env'),
+  /** Directory the `file` provider reads from. */
+  SECRET_DIR: z.string().default('./.secrets'),
 });
 
 export type Config = z.infer<typeof ConfigSchema> & { isProduction: boolean };
@@ -28,9 +105,49 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`invalid configuration: ${detail}`);
   }
   const config = parsed.data;
-  if (config.NODE_ENV === 'production' && config.RECEIPT_SIGNING_KEY_B64 === '') {
-    // Unsigned evidence in production would be evidence of nothing.
-    throw new Error('RECEIPT_SIGNING_KEY_B64 is required in production');
+  if (config.NODE_ENV === 'production' && config.RECEIPT_SIGNING_KEY_B64 !== '') {
+    // Inverted from what it used to say, which was that this variable is
+    // *required* in production. That was the wrong requirement: an Ed25519
+    // private key in an environment variable is visible to anything that can
+    // read /proc, is captured by most crash reporters, and is inherited by
+    // every child process. Production takes its signing key from the secret
+    // provider under RECEIPT_SIGNING_KEY_NAME; setting the inline variable is
+    // now the misconfiguration, and boot refuses rather than preferring it.
+    //
+    // Production still cannot start unsigned: an absent key makes
+    // loadEvidenceKeys throw rather than fall back to an ephemeral one.
+    throw new Error(
+      'RECEIPT_SIGNING_KEY_B64 must not be set in production; ' +
+        'the signing key is read from the configured secret provider',
+    );
+  }
+  if (config.NODE_ENV === 'production' && config.SIGNAL_AUTHENTICATION !== 'required') {
+    // A signal plane that accepts unauthenticated input is one where anyone
+    // who reaches the API can shrink an agent's authority -- a denial of
+    // service against a legitimate agent, delivered through the control plane
+    // itself.
+    throw new Error(
+      'SIGNAL_AUTHENTICATION must be "required" in production; ' +
+        'unenrolled signal sources cannot be trusted with authority reduction',
+    );
+  }
+  if (config.NODE_ENV === 'production' && config.SIGNAL_LEGACY_HMAC !== 'refused') {
+    // Holding a source's HMAC secret means holding the ability to forge that
+    // source's signals. Refused at boot rather than at enrolment, so a
+    // deployment cannot reach a state where the table already contains one.
+    throw new Error(
+      'SIGNAL_LEGACY_HMAC must be "refused" in production; ' +
+        'a shared signal secret is a forgery capability held in the database',
+    );
+  }
+  if (config.NODE_ENV === 'production' && config.SECRET_PROVIDER !== 'kms') {
+    // Local key custody in production means the private key lives wherever the
+    // process does: in an environment variable a crash dump captures, or a
+    // file on a disk that gets snapshotted. Refuse at boot rather than
+    // discover it during an incident.
+    throw new Error(
+      `SECRET_PROVIDER must be "kms" in production; "${config.SECRET_PROVIDER}" is local custody`,
+    );
   }
   return { ...config, isProduction: config.NODE_ENV === 'production' };
 }

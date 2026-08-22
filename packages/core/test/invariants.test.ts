@@ -9,7 +9,7 @@ import {
 import { authorizeDelegation } from '../src/delegation.js';
 import { evaluateAuthorization } from '../src/evaluate.js';
 import { parseMoney } from '../src/money.js';
-import { lease, snapshot, treasuryPolicy, T0 } from './fixtures.js';
+import { lease, snapshot, treasuryPolicy, T0, type SnapshotOptions } from './fixtures.js';
 
 /**
  * Containment is a property of the authority lattice, not of any one policy.
@@ -185,6 +185,188 @@ describe('invariant: decay only ever shrinks authority', () => {
         `iteration ${i}: ${JSON.stringify(base)}`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * ---------------------------------------------------------------------------
+ * G-5, containment layer.
+ * ---------------------------------------------------------------------------
+ *
+ * The property above proves that `restrictGrant` narrows. This one proves the
+ * thing that actually matters at the boundary: that no *signal* -- of any type,
+ * at any value, from any source, in any combination -- can make a decision more
+ * permissive than the same decision with no signals at all.
+ *
+ * That is the layer that survives a compromised issuer. The cryptography
+ * assumes an attacker cannot sign; this assumes they can, and holds anyway. So
+ * it is asserted here, over randomised input, rather than in a handful of
+ * scenario tests that only cover the signal values somebody thought of.
+ */
+const SIGNAL_TYPES = [
+  'fraud_risk',
+  'counterparty_risk',
+  'model_confidence',
+  'anomaly_score',
+  // A type no rule reads. A signal the policy has no opinion about must be
+  // inert, not a default of any kind.
+  'unrecognised_reading',
+];
+const SIGNAL_VALUES = ['0', '0.0001', '0.5', '0.9', '1', '9999', '-1'];
+
+/** Strictest first. A decision may move down this list under a signal, never up. */
+const PERMISSIVENESS = ['DENY', 'ESCALATE', 'ALLOW'];
+
+function randomSignals(random: () => number, agentId: string, counterpartyId: string) {
+  const count = Math.floor(random() * 4);
+  return Array.from({ length: count }, (_unused, index) => {
+    const signalType = SIGNAL_TYPES[Math.floor(random() * SIGNAL_TYPES.length)]!;
+    const onCounterparty = signalType === 'counterparty_risk';
+    return {
+      id: `sig_${index}`,
+      subject_type: (onCounterparty ? 'counterparty' : 'agent') as 'counterparty' | 'agent',
+      subject_id: onCounterparty ? counterpartyId : agentId,
+      signal_type: signalType,
+      value: SIGNAL_VALUES[Math.floor(random() * SIGNAL_VALUES.length)]!,
+      confidence: random() < 0.5 ? '1' : '0.5',
+      source: random() < 0.5 ? 'external_fraud_engine' : 'agent_self_report',
+      issued_at: new Date(T0.getTime() - 60_000).toISOString(),
+      expires_at: new Date(T0.getTime() + 600_000).toISOString(),
+    };
+  });
+}
+
+describe('invariant: a signal can only ever subtract authority', () => {
+  it('holds over 1500 randomised signal sets', () => {
+    const random = rng(90_210);
+    for (let i = 0; i < 1500; i++) {
+      const counterpartyId = COUNTERPARTIES[Math.floor(random() * 3)]!;
+      const amount = AMOUNTS[Math.floor(random() * AMOUNTS.length)]!;
+      const resourceId = ACCOUNTS[Math.floor(random() * 3)]!;
+      const candidate = lease({ grant: randomGrant(random) });
+      const base = {
+        amount,
+        action: 'wire.execute',
+        resourceId,
+        counterpartyId,
+        candidates: [{ lease: candidate, chain: [candidate] }],
+      };
+
+      const without = evaluateAuthorization(snapshot(base));
+      const withSignals = evaluateAuthorization(
+        snapshot({ ...base, signals: randomSignals(random, 'agent_treasury', counterpartyId) }),
+      );
+
+      const context = () => `iteration ${i}: ${JSON.stringify({ candidate, amount })}`;
+
+      // 1. The decision never becomes more permissive.
+      expect(
+        PERMISSIVENESS.indexOf(withSignals.decision) <= PERMISSIVENESS.indexOf(without.decision),
+        `${context()}: ${without.decision} became ${withSignals.decision} under a signal`,
+      ).toBe(true);
+
+      // 2. The effective grant is still contained by the authority actually
+      //    held. A decision that stayed the same while the grant behind it
+      //    widened is a defect waiting for the next request.
+      for (const finding of withSignals.evaluation.authority_findings) {
+        // Null when no effect applied, which is itself containment holding.
+        if (!finding.effective_grant) continue;
+        expect(
+          containsGrant(candidate.grant, finding.effective_grant).contained,
+          `${context()}: signal widened the effective grant`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe('regression: a signal cannot make a refusal approvable (G-5)', () => {
+  /**
+   * The concrete case the randomised property found, pinned so the fix cannot
+   * regress silently. A lease denominated in EUR does not cover a USD wire, so
+   * the request is refused outright: the policy's ordinary rule for this action
+   * names no approver, and nobody can supply the difference.
+   *
+   * Then the fraud engine -- which we assume is fully compromised, holding a
+   * key Scrutexity correctly trusts -- asserts a fraud score above the
+   * escalation threshold. That rule *does* name a treasurer. Before the fix,
+   * the shortfall became something a treasurer could approve: asserting more
+   * risk produced a more permissive outcome, and the approver became a
+   * confused deputy for an action the agent's authority never covered.
+   */
+  const eurOnlyLease = () =>
+    lease({
+      grant: {
+        actions: ['wire.execute'],
+        resources: { bank_account: ['acct_001'], counterparty: ['cp_100'] },
+        constraints: {
+          max_amount: parseMoney('1000000', 'EUR'),
+          currencies: ['EUR'],
+          allowed_counterparties: ['cp_100'],
+        },
+      },
+    });
+
+  const evaluateWith = (signals: SnapshotOptions['signals']) => {
+    const candidate = eurOnlyLease();
+    return evaluateAuthorization(
+      snapshot({
+        action: 'wire.execute',
+        amount: '100',
+        currency: 'USD',
+        resourceId: 'acct_001',
+        counterpartyId: 'cp_100',
+        candidates: [{ lease: candidate, chain: [candidate] }],
+        ...(signals ? { signals } : {}),
+      }),
+    );
+  };
+
+  const highFraudSignal = [
+    {
+      id: 'sig_fraud',
+      subject_type: 'agent' as const,
+      subject_id: 'agent_treasury',
+      signal_type: 'fraud_risk',
+      value: '0.99',
+      confidence: '1',
+      source: 'external_fraud_engine',
+      issued_at: new Date(T0.getTime() - 60_000).toISOString(),
+      expires_at: new Date(T0.getTime() + 600_000).toISOString(),
+    },
+  ];
+
+  it('denies the uncovered request with no signal present', () => {
+    const result = evaluateWith(undefined);
+    expect(result.decision).toBe('DENY');
+    expect(result.approval_requirement).toBeNull();
+  });
+
+  it('still denies it when a trusted source asserts maximum risk', () => {
+    const result = evaluateWith(highFraudSignal);
+    expect(result.decision).toBe('DENY');
+    // And no approval requirement is published, so nothing downstream can
+    // present a treasurer with a request to approve.
+    expect(result.approval_requirement).toBeNull();
+  });
+
+  it('still lets a signal escalate something policy already permitted', () => {
+    // The positive control. Without it, the two assertions above would also
+    // pass if signals had simply been made inert, which would remove authority
+    // decay -- the feature the signal plane exists for.
+    const covering = lease();
+    const result = evaluateAuthorization(
+      snapshot({
+        action: 'wire.execute',
+        amount: '100',
+        resourceId: 'acct_001',
+        counterpartyId: 'cp_100',
+        candidates: [{ lease: covering, chain: [covering] }],
+        signals: highFraudSignal,
+      }),
+    );
+    expect(result.decision).toBe('ESCALATE');
+    expect(result.approval_requirement).not.toBeNull();
   });
 });
 

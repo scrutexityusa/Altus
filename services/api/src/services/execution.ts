@@ -1,7 +1,15 @@
-import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
+import {
+  ScrutexityError,
+  compareDecisionContext,
+  computeDecisionContextHash,
+  isExpired,
+  newId,
+} from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
 import { metrics } from '../metrics.js';
 import { appendReceipt, type EvidenceKeys } from './evidence.js';
+import { currentContextHash } from './context.js';
+import { securityNow } from '../db/security-clock.js';
 
 /**
  * Recording an execution against a decision.
@@ -47,10 +55,37 @@ export async function recordExecution(
       },
     );
   }
-  if (decision.expires_at && isExpired(decision.expires_at, new Date())) {
+  const now = await securityNow(client);
+  if (decision.expires_at && isExpired(decision.expires_at, now)) {
     throw new ScrutexityError(
       'AUTHORITY_EXPIRED',
       'the execution grant conferred by this decision has expired; re-evaluate',
+    );
+  }
+
+  // -- The TOCTOU control --------------------------------------------------
+  //
+  // Recompute the fingerprint of the conditions this decision rests on, as
+  // they stand *now*, and refuse if it has moved. A fraud signal that arrived
+  // after a treasurer approved a wire is exactly the case this exists for: the
+  // approval described a world that no longer holds.
+  const current = await currentContextHash(client, decision);
+  const comparison = compareDecisionContext(
+    decision.context_hash,
+    current,
+    (decision.approval_ids ?? []).length > 0,
+  );
+  if (!comparison.matches) {
+    metrics.contextMismatches.inc({ approved: String(comparison.was_approved) });
+    throw new ScrutexityError(
+      comparison.was_approved ? 'APPROVAL_CONTEXT_MISMATCH' : 'CONTEXT_CHANGED',
+      comparison.was_approved
+        ? 'the conditions changed since this action was approved; it must be re-evaluated and re-approved'
+        : 'the conditions changed since this action was authorised; re-evaluate',
+      {
+        disclose: true,
+        internal: { expected: comparison.expected, observed: comparison.observed },
+      },
     );
   }
 
@@ -85,6 +120,22 @@ export async function recordExecution(
     throw error;
   }
 
+  // Spend the grant. Guarded on the claim so an execution can only consume
+  // the grant that authorised it, and only once.
+  if (decision.authority_lease_id) {
+    const consumed = await client.query(
+      `UPDATE scrutexity.authority_leases
+          SET consumed = true, used_at = now()
+        WHERE id = $1
+          AND grant_type = 'SINGLE_USE'
+          AND claimed_by_decision_id = $2
+          AND NOT consumed
+        RETURNING id`,
+      [decision.authority_lease_id, input.decisionId],
+    );
+    if ((consumed.rowCount ?? 0) > 0) metrics.singleUseGrantsConsumed.inc({});
+  }
+
   const receipt = await appendReceipt(client, keys, {
     organizationId: input.organizationId,
     kind: 'EXECUTION',
@@ -99,6 +150,10 @@ export async function recordExecution(
       status: input.status,
       result: input.result ?? {},
       grant_expired_at: decision.expires_at ? decision.expires_at.toISOString() : null,
+      // Recorded so a verifier can confirm the execution happened under the
+      // same conditions the decision was made under.
+      context_hash: decision.context_hash,
+      authority_lease_id: decision.authority_lease_id,
     },
   });
 

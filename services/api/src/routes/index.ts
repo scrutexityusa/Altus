@@ -1,6 +1,8 @@
 import {
   ScrutexityError,
   explainDecision,
+  effectiveLeaseStatus,
+  grantState,
   hashObject,
   loadPolicyDocument,
   loadPolicyYaml,
@@ -8,9 +10,10 @@ import {
   verifyReceipt,
 } from '@scrutexity/core';
 import type { FastifyInstance } from 'fastify';
-import { SCOPES, requireHuman, requireScope, type Principal } from '../auth.js';
+import { SCOPES, requireHuman, requireNonAgent, requireScope, type Principal } from '../auth.js';
 import { claimIdempotencyKey, completeIdempotencyKey } from '../idempotency.js';
 import type { Database, PoolClient } from '../db/pool.js';
+import { securityNow } from '../db/security-clock.js';
 import { toLease, type LeaseRow } from '../db/rows.js';
 import type { EvidenceKeys } from '../services/evidence.js';
 import { fetchReceipt, verifyReceiptWithChain } from '../services/evidence.js';
@@ -26,16 +29,49 @@ import {
   CreateLeaseSchema,
   CreatePolicyVersionSchema,
   IngestSignalSchema,
+  ExecuteSchema,
   RecordExecutionSchema,
   ReviewPolicyVersionSchema,
+  RegisterSignalKeySchema,
+  RotateSignalKeySchema,
   RevokeLeaseSchema,
   SubmitApprovalSchema,
 } from '../schemas.js';
+import { buildDecisionTrace } from '../services/trace.js';
+import { recordSecurityEvent, securityEventOf } from '../services/security-events.js';
+import { enforceExecution } from '../adapter/enforce.js';
+import type { ProviderRegistry } from '../adapter/provider.js';
+import { metrics } from '../metrics.js';
+import type { Config } from '../config.js';
 
 export interface RouteDeps {
   db: Database;
   keys: EvidenceKeys;
+  /**
+   * The validated deployment configuration.
+   *
+   * Routes read it for posture decisions that must not be re-derived per
+   * request -- whether unauthenticated signals are admitted, whether HMAC key
+   * registration is permitted. Passing the whole config rather than a handful
+   * of booleans keeps one source of truth: a posture flag added to `config.ts`
+   * cannot be silently missing here.
+   */
+  config: Config;
+  /**
+   * The execution providers this deployment is configured with. Registered at
+   * boot rather than looked up per request, so an operation with no provider
+   * is refused deterministically instead of depending on what happens to be
+   * reachable at that moment.
+   */
+  providers: ProviderRegistry;
 }
+
+/**
+ * The signing algorithms accepted unless a deployment has explicitly opted
+ * into the legacy one. A list rather than a constant so that adding to it is a
+ * visible decision, not so that it is easy.
+ */
+const DEFAULT_SIGNAL_ALGORITHMS = ['ED25519'] as const;
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -44,7 +80,57 @@ declare module 'fastify' {
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
-  const { db, keys } = deps;
+  const { db, keys, providers, config } = deps;
+
+  /**
+   * Ordinary reads: an agent's own decisions, leases, traces and receipts.
+   *
+   * Every GET goes through one of these two. Before this existed the `read`
+   * scope was granted by the seed and checked by nothing, which meant an agent
+   * credential could fetch the policy document that governs it and the
+   * security-event log recording its own attacks. Scopes that are never
+   * enforced are worse than absent -- they read as a control in every review.
+   */
+  function requireRead(principal: Principal): void {
+    requireScope(principal, SCOPES.read);
+  }
+
+  /**
+   * Operator reads: the policy documents, the security event log, signing key
+   * metadata, the agent register, unresolved executions.
+   *
+   * Two independent gates, because either alone would be too weak. The scope
+   * keeps out credentials that were never meant to audit; `requireNonAgent`
+   * keeps out an agent that was mistakenly granted the scope. The principal
+   * whose behaviour this control plane exists to constrain must not be able to
+   * read the constraints.
+   */
+  function requireOperatorRead(principal: Principal): void {
+    requireScope(principal, SCOPES.audit);
+    requireNonAgent(principal);
+  }
+
+  /**
+   * An agent may read only the records it is the subject of.
+   *
+   * Tenancy alone is not enough here. Two agents in one tenant are two
+   * principals with different authority, and an id that appears in a URL is
+   * guessable, enumerable and frequently logged -- so without this, holding a
+   * decision id is the same as being the agent it was issued to.
+   *
+   * NOT_FOUND rather than FORBIDDEN, deliberately. A 403 confirms the record
+   * exists, which turns the endpoint into an oracle an attacker can sweep to
+   * map another agent's activity. A prober learns nothing either way.
+   *
+   * Humans and services are not narrowed: an operator investigating an
+   * incident needs to read across agents, and that is what the audit scope and
+   * the security event log are for.
+   */
+  function assertMayReadSubject(principal: Principal, subjectAgentId: string | null): void {
+    if (principal.type !== 'agent') return;
+    if (subjectAgentId !== null && subjectAgentId === principal.id) return;
+    throw new ScrutexityError('NOT_FOUND', 'not found');
+  }
 
   /**
    * Runs a handler in a tenant-scoped transaction, honouring an
@@ -77,6 +163,31 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       }
       return handler(client);
     });
+  }
+
+  /**
+   * Runs `fn`, and if it fails with an error carrying a security event, writes
+   * that event on its own transaction before rethrowing. The failing
+   * transaction has already rolled back by then, which is exactly why the
+   * record cannot be written inside it.
+   */
+  async function recordingRejections<T>(
+    request: { principal: Principal },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (error) {
+      const event = securityEventOf(error);
+      if (event) {
+        await db
+          .withTenant(request.principal.organization_id, (client) =>
+            recordSecurityEvent(client, event),
+          )
+          .catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   // ==========================================================================
@@ -121,17 +232,19 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     reply.code(status).send(payload);
   });
 
-  app.get('/v1/agents', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/agents', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         'SELECT * FROM scrutexity.agents ORDER BY created_at DESC LIMIT 200',
       );
       return { agents: result.rows.map(serializeAgent) };
-    }),
-  );
+    });
+  });
 
-  app.get<{ Params: { id: string } }>('/v1/agents/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const agent = await client.query(
         'SELECT * FROM scrutexity.agents WHERE id = $1 OR handle = $1',
         [request.params.id],
@@ -175,8 +288,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         risk_signals: signals.rows.map(serializeSignal),
         recent_decisions: decisions.rows,
       };
-    }),
-  );
+    });
+  });
 
   // ==========================================================================
   // Authority
@@ -185,30 +298,34 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/authority-leases', async (request, reply) => {
     requireScope(request.principal, SCOPES.leaseWrite);
     const body = CreateLeaseSchema.parse(request.body);
-    const { status, body: payload } = await mutate(
-      request as never,
-      'POST /v1/authority-leases',
-      async (client) => {
+    // An attempt to issue beyond the ceiling is a security event, and the
+    // transaction that produced it is about to roll back.
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/authority-leases', async (client) => {
         const result = await issueLease(client, keys, {
           organizationId: request.principal.organization_id,
           agentId: await resolveAgentId(client, body.agent_id),
           grant: body.grant,
           ttlSeconds: body.ttl_seconds,
           issuedByUserId: request.principal.type === 'user' ? request.principal.id : null,
+          issuer: { type: request.principal.type, id: request.principal.id },
           revocable: body.revocable,
+          grantType: body.grant_type,
+          purpose: body.purpose ?? null,
           metadata: body.metadata,
         });
         return {
           status: 201,
           body: { authority_lease: result.lease, receipt_id: result.receipt_id },
         };
-      },
+      }),
     );
     reply.code(status).send(payload);
   });
 
-  app.get<{ Params: { id: string } }>('/v1/authority-leases/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/authority-leases/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `WITH RECURSIVE chain AS (
            SELECT * FROM scrutexity.authority_leases WHERE id = $1
@@ -219,11 +336,59 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       );
       if (result.rowCount === 0)
         throw new ScrutexityError('NOT_FOUND', 'authority lease not found');
+      // The same clock an authorization would use. A lease reported ACTIVE
+      // here and refused as EXPIRED a moment later by a decision would make
+      // this endpoint a liar about the thing it exists to describe.
+      const now = await securityNow(client);
       const rows = (result.rows as LeaseRow[]).map(toLease);
       const lease = rows.find((l) => l.id === request.params.id)!;
-      return { authority_lease: lease, ancestry: rows };
-    }),
-  );
+      assertMayReadSubject(request.principal, lease.agent_id);
+
+      // Whether a claimed grant was ever acted on is not derivable from the
+      // lease row alone: a claim with no execution behind it means the agent
+      // never came back. Surfaced here so an operator does not have to join it
+      // by hand -- see ADR-0013 on why that state is deliberately terminal.
+      const execution = await client.query(
+        `SELECT e.id, e.status, e.created_at
+           FROM scrutexity.execution_attempts e
+           JOIN scrutexity.authorization_decisions d ON d.id = e.decision_id
+          WHERE d.authority_lease_id = $1
+          ORDER BY e.created_at DESC LIMIT 1`,
+        [lease.id],
+      );
+
+      return {
+        authority_lease: {
+          ...lease,
+          /**
+           * What a decision would conclude about this lease right now, on the
+           * authoritative clock.
+           *
+           * `status` is the stored column -- the disposition someone wrote.
+           * It says ACTIVE for a lease that has simply run out of time,
+           * because nothing goes back to rewrite rows when a clock passes
+           * them. Reporting only that would have this endpoint call a lease
+           * ACTIVE while an authorization refuses it as EXPIRED, which is a
+           * lie about the one thing it exists to describe.
+           */
+          effective_status: effectiveLeaseStatus(lease, now),
+          grant_state: grantState(lease, now),
+          execution_outcome: execution.rows[0]
+            ? {
+                execution_id: execution.rows[0].id,
+                status: execution.rows[0].status,
+                recorded_at: (execution.rows[0].created_at as Date).toISOString(),
+              }
+            : null,
+        },
+        ancestry: rows.map((l) => ({
+          ...l,
+          effective_status: effectiveLeaseStatus(l, now),
+          grant_state: grantState(l, now),
+        })),
+      };
+    });
+  });
 
   app.post<{ Params: { id: string } }>('/v1/authority-leases/:id/revoke', async (request) => {
     requireScope(request.principal, SCOPES.leaseWrite);
@@ -294,43 +459,65 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       }
     }
 
-    return mutate(request, endpoint, async (client) => {
-      const result = await authorize(client, keys, {
-        organizationId: request.principal.organization_id,
-        agentHandleOrId: body.agent_id,
-        action: body.action,
-        resource: body.resource,
-        context: body.context,
-        presentedLeaseId: body.authority_lease_id ?? null,
-        nonce: body.nonce ?? null,
-        idempotencyKey: (request.headers['idempotency-key'] as string | undefined) ?? null,
-        correlationId: body.correlation_id ?? null,
-      });
-      return {
-        // 200 for every evaluated outcome. A DENY is a successful evaluation
-        // that answered "no"; returning 4xx would conflate it with a
-        // malformed request and break clients that branch on status.
-        status: 200,
-        body: {
-          authorization_request_id: result.request_id,
-          decision_id: result.decision_id,
-          receipt_id: result.receipt_id,
-          approval_request_id: result.approval_request_id,
-          decision: result.evaluation.decision,
-          reason_code: result.evaluation.reason_code,
-          policy_id: result.evaluation.policy_id,
-          policy_version: result.evaluation.policy_version,
-          policy_hash: result.evaluation.policy_hash,
-          authority_lease_id: result.evaluation.authority_lease_id,
-          risk_signal_ids: result.evaluation.risk_signal_ids,
-          constraints_evaluated: result.evaluation.constraints_evaluated,
-          approval_requirement: result.evaluation.approval_requirement,
-          failover_behavior: result.evaluation.failover_behavior,
-          expires_at: result.evaluation.expires_at,
-          decision_timestamp: result.evaluation.decision_timestamp,
-        },
-      };
-    });
+    // An invariant violation on this path carries a security event, and the
+    // transaction that produced it is about to roll back -- so the write has
+    // to happen outside it. See services/security-events.ts.
+    return recordingRejections(request, () =>
+      mutate(request, endpoint, async (client) => {
+        const result = await authorize(client, keys, {
+          organizationId: request.principal.organization_id,
+          agentHandleOrId: body.agent_id,
+          action: body.action,
+          resource: body.resource,
+          context: body.context,
+          presentedLeaseId: body.authority_lease_id ?? null,
+          declaredIntent: body.declared_intent ?? null,
+          nonce: body.nonce ?? null,
+          idempotencyKey: (request.headers['idempotency-key'] as string | undefined) ?? null,
+          correlationId: body.correlation_id ?? null,
+        });
+        return {
+          // 200 for every evaluated outcome. A DENY is a successful evaluation
+          // that answered "no"; returning 4xx would conflate it with a
+          // malformed request and break clients that branch on status.
+          status: 200,
+          body: {
+            authorization_request_id: result.request_id,
+            decision_id: result.decision_id,
+            receipt_id: result.receipt_id,
+            approval_request_id: result.approval_request_id,
+            decision: result.evaluation.decision,
+            reason_code: result.evaluation.reason_code,
+            policy_id: result.evaluation.policy_id,
+            policy_version: result.evaluation.policy_version,
+            policy_hash: result.evaluation.policy_hash,
+            authority_lease_id: result.evaluation.authority_lease_id,
+            risk_signal_ids: result.evaluation.risk_signal_ids,
+            constraints_evaluated: result.evaluation.constraints_evaluated,
+            approval_requirement: result.evaluation.approval_requirement,
+            // The structured intent verdict. Never prose; the explanation
+            // compiler renders this same data as text.
+            intent_evaluation: result.evaluation.intent_evaluation,
+            // The next legitimate step, when one exists. Computed by the policy
+            // layer from this decision -- see packages/core/src/corrective.ts.
+            corrective_actions: result.corrective_actions,
+            // Fingerprint of the conditions this decision rests on.
+            context_hash: result.evaluation.context_hash,
+            // The exact operation this ALLOW authorises, bound to this ALLOW.
+            // Null for a DENY or an ESCALATE: nothing was authorised, so there
+            // is nothing to bind. The caller does not need these to execute --
+            // the enforcement boundary recomputes both from its own records --
+            // but returning them lets a caller confirm up front that the system
+            // understood the operation the same way it did.
+            exact_intent_hash: result.exact_intent_hash,
+            binding_hash: result.binding_hash,
+            failover_behavior: result.evaluation.failover_behavior,
+            expires_at: result.evaluation.expires_at,
+            decision_timestamp: result.evaluation.decision_timestamp,
+          },
+        };
+      }),
+    );
   };
 
   app.post('/v1/authorization-requests', async (request, reply) => {
@@ -356,8 +543,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
    * human-readable rendering below it is assembled deterministically from the
    * same structured facts, never generated.
    */
-  app.get<{ Params: { id: string } }>('/v1/authorization-decisions/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/authorization-decisions/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT d.*, r.action, r.resource_type, r.resource_id, r.context, r.created_at AS requested_at,
                 a.handle AS agent_handle
@@ -370,6 +558,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
       if (result.rowCount === 0)
         throw new ScrutexityError('NOT_FOUND', 'authorization decision not found');
       const row = result.rows[0];
+      assertMayReadSubject(request.principal, row.agent_id as string);
 
       // When the acting authority was delegated, name the agent that granted
       // it. The explanation is materially different -- "that authority was
@@ -453,9 +642,123 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
             : {}),
         }),
       };
-    }),
+    });
+  });
+
+  /**
+   * The enforcement boundary.
+   *
+   * Scrutexity performs the operation here. The caller presents what it
+   * believes it is executing; the boundary verifies that against the operation
+   * the grant was issued for, claims execution rights atomically, calls the
+   * provider under a key derived from the grant, and writes evidence naming
+   * both hashes.
+   *
+   * Wrapped in `recordingRejections` because every refusal on this path is a
+   * security event, and the transaction that produced it is about to roll back
+   * -- see services/security-events.ts.
+   */
+  app.post('/v1/execute', async (request, reply) => {
+    requireScope(request.principal, SCOPES.authorize);
+    const body = ExecuteSchema.parse(request.body);
+    // Deliberately not wrapped in `mutate`. The boundary owns its own
+    // transactions -- it has to, because the provider call must happen between
+    // two commits rather than inside one -- and an outer transaction would put
+    // the external call back inside a transaction it does not control.
+    //
+    // Nothing is lost by dropping the Idempotency-Key path here: the grant
+    // *is* the idempotency key on this route. `UNIQUE (decision_id)` on
+    // execution_claims is a stronger control than a caller-supplied header,
+    // and it is the same value the provider is called under.
+    const payload = await recordingRejections(request, async () => {
+      const agentId =
+        request.principal.type === 'agent'
+          ? request.principal.id
+          : await db.withTenant(request.principal.organization_id, (client) =>
+              decisionAgentId(client, body.decision_id),
+            );
+      return enforceExecution(db, keys, providers, {
+        organizationId: request.principal.organization_id,
+        decisionId: body.decision_id,
+        agentId,
+        presentedOperation: body.operation,
+      });
+    });
+    // 200, not 201, when this is the recorded outcome of an earlier execution.
+    // Nothing was created and the provider was not called; a client retrying
+    // after a network blip gets its answer, and the status says plainly that
+    // it is looking at the same event again rather than a new one.
+    reply.code(payload.replayed === true ? 200 : 201).send(payload);
+  });
+
+  /**
+   * Everything the boundary started and could not finish.
+   *
+   * A claim is EXECUTING while the provider call is in flight, and UNKNOWN
+   * when the provider did not answer. Either state, once it has been sitting
+   * for a while, means authority was spent and nobody in this system knows
+   * what happened at the other end. Only the external system can settle that,
+   * so this endpoint exists to hand an operator or a reconciliation job the
+   * list rather than have it construct one.
+   *
+   * Deliberately not a background worker inside the API process: with more
+   * than one replica that needs leader election, and a reconciliation loop
+   * that runs twice is exactly the thing that turns an UNKNOWN into a double
+   * payment.
+   */
+  app.get<{ Querystring: { older_than_seconds?: string } }>(
+    '/v1/executions/unresolved',
+    async (request) => {
+      requireOperatorRead(request.principal);
+      const olderThan = Math.min(
+        86_400,
+        Math.max(0, Number(request.query.older_than_seconds ?? 0) || 0),
+      );
+      return db.withTenant(request.principal.organization_id, async (client) => {
+        const result = await client.query(
+          `SELECT c.id, c.decision_id, c.agent_id, c.state, c.provider,
+                  c.idempotency_key, c.external_reference, c.last_error,
+                  c.claimed_at, c.resolved_at
+             FROM scrutexity.execution_claims c
+            WHERE c.state IN ('EXECUTING', 'UNKNOWN')
+              AND c.claimed_at < now() - make_interval(secs => $1)
+            ORDER BY c.claimed_at ASC
+            LIMIT 200`,
+          [olderThan],
+        );
+        return {
+          unresolved: result.rows.map((row) => ({
+            claim_id: row.id,
+            decision_id: row.decision_id,
+            agent_id: row.agent_id,
+            state: row.state,
+            provider: row.provider,
+            // The key the provider was called under. A reconciliation job asks
+            // the provider about *this* key; asking about anything else would
+            // be asking about a different request.
+            idempotency_key: row.idempotency_key,
+            external_reference: row.external_reference,
+            last_error: row.last_error,
+            claimed_at: (row.claimed_at as Date).toISOString(),
+            resolved_at: row.resolved_at ? (row.resolved_at as Date).toISOString() : null,
+          })),
+        };
+      });
+    },
   );
 
+  /**
+   * The self-report path.
+   *
+   * The caller performed the operation itself and is telling Scrutexity what
+   * happened. Scrutexity records it, spends the grant and writes a receipt --
+   * but it verified nothing about the operation, because it never saw one.
+   *
+   * This is not enforcement and evidence written here says so: the attempt
+   * carries `enforced = false`. Kept because an integration that cannot route
+   * its side effects through a provider is better off recording them than
+   * recording nothing, and removed the moment it stops being true.
+   */
   app.post('/v1/executions', async (request, reply) => {
     requireScope(request.principal, SCOPES.authorize);
     const body = RecordExecutionSchema.parse(request.body);
@@ -488,10 +791,11 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/signals', async (request, reply) => {
     requireScope(request.principal, SCOPES.signalWrite);
     const body = IngestSignalSchema.parse(request.body);
-    const { status, body: payload } = await mutate(
-      request as never,
-      'POST /v1/signals',
-      async (client) => {
+    // A rejected signal rolls its transaction back, so any security event
+    // written inside it would vanish with it. Recording it out here, on a
+    // fresh transaction, is what makes a refusal auditable.
+    const { status, body: payload } = await recordingRejections(request, () =>
+      mutate(request as never, 'POST /v1/signals', async (client) => {
         const result = await ingestSignal(client, keys, {
           organizationId: request.principal.organization_id,
           subjectType: body.subject.type,
@@ -503,9 +807,22 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ttlSeconds: body.ttl_seconds,
           issuedAt: body.issued_at,
           metadata: body.metadata,
+          eventId: body.event_id ?? null,
+          signature: body.signature ?? null,
+          signingKeyId: body.signing_key_id ?? null,
+          // Required unless the deployment has explicitly chosen otherwise.
+          // Production cannot choose otherwise; config.ts refuses to boot.
+          requireAuthentication: config.SIGNAL_AUTHENTICATION === 'required',
+          // Checked here rather than only at registration. Refusing HMAC when
+          // a key is enrolled stops new ones; refusing it when a signal
+          // arrives also stops the ones already in the table -- written before
+          // that check existed, or restored from a backup taken before it.
+          // See ADR-0018.
+          allowedAlgorithms:
+            config.SIGNAL_LEGACY_HMAC === 'permitted' ? undefined : DEFAULT_SIGNAL_ALGORITHMS,
         });
         return { status: 201, body: result };
-      },
+      }),
     );
     reply.code(status).send(payload);
   });
@@ -514,8 +831,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   // Approvals
   // ==========================================================================
 
-  app.get('/v1/approval-requests', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/approval-requests', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT ar.*, d.decision, d.reason_code, d.agent_id, r.action, r.resource_type,
                 r.resource_id, r.context, a.handle AS agent_handle
@@ -527,8 +845,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           ORDER BY ar.created_at DESC LIMIT 100`,
       );
       return { approval_requests: result.rows };
-    }),
-  );
+    });
+  });
 
   app.post('/v1/approvals', async (request, reply) => {
     requireScope(request.principal, SCOPES.approve);
@@ -574,13 +892,17 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   // Evidence
   // ==========================================================================
 
-  app.get<{ Params: { id: string } }>('/v1/receipts/:id', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get<{ Params: { id: string } }>('/v1/receipts/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const receipt = await fetchReceipt(client, request.params.id);
       if (!receipt) throw new ScrutexityError('NOT_FOUND', 'receipt not found');
+      // A receipt's subject is the agent it is about. An agent may hold its own
+      // evidence; it may not read the chain entry for another agent's wire.
+      assertMayReadSubject(request.principal, receipt.subject_id);
       return { receipt };
-    }),
-  );
+    });
+  });
 
   app.post<{ Params: { id: string } }>('/v1/receipts/:id/verify', async (request) =>
     db.withTenant(request.principal.organization_id, async (client) => {
@@ -824,23 +1146,220 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
     });
   });
 
-  app.get('/v1/policy-versions', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/policy-versions', async (request) => {
+    // The policy document itself. An agent that can read this has every
+    // threshold, approver role and decay rule that governs it -- which defeats
+    // the leak controls the refusal paths take seriously.
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const result = await client.query(
         `SELECT pv.*, p.key AS policy_key FROM scrutexity.policy_versions pv
            JOIN scrutexity.policies p ON p.id = pv.policy_id
           ORDER BY pv.created_at DESC LIMIT 100`,
       );
       return { policy_versions: result.rows.map(serializePolicyVersion) };
-    }),
-  );
+    });
+  });
+
+  // ==========================================================================
+  // Causal evidence
+  // ==========================================================================
+
+  /**
+   * The root-cause trace: where the authority behind this decision came from,
+   * in causal order, oldest cause first. A database traversal -- nothing is
+   * summarised or generated, so the same decision always yields the same trace.
+   */
+  app.get<{ Params: { id: string } }>('/v1/trace/:id', async (request) => {
+    requireRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      // Checked before the trace is built, not after. The trace walks policy
+      // activations, signal ingestion and the whole authority ancestry -- it is
+      // the richest read in the API, and an agent must not be able to obtain
+      // one for a decision that was not issued to it.
+      const subject = await client.query(
+        'SELECT agent_id FROM scrutexity.authorization_decisions WHERE id = $1',
+        [request.params.id],
+      );
+      assertMayReadSubject(
+        request.principal,
+        (subject.rows[0]?.agent_id as string | undefined) ?? null,
+      );
+
+      const started = performance.now();
+      const trace = await buildDecisionTrace(client, request.params.id);
+      metrics.traceDuration.observe((performance.now() - started) / 1000);
+      metrics.traceNodes.observe(trace.trace.length);
+      return trace;
+    });
+  });
+
+  // ==========================================================================
+  // Signal signing keys
+  // ==========================================================================
+
+  app.post('/v1/signal-keys', async (request, reply) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    const body = RegisterSignalKeySchema.parse(request.body);
+
+    // Ed25519 is the authentication path. HMAC exists only for a deployment
+    // that has explicitly opted into it while migrating a legacy source.
+    //
+    // HMAC requires the verifier to hold the same secret that produces
+    // signatures, so Scrutexity would be storing, for every source, a value
+    // that manufactures signals reducing authority over real money. A database
+    // disclosure would hand an attacker the ability to forge them. With
+    // Ed25519 only the public half is stored and a disclosure yields nothing.
+    //
+    // Refused here *as well as* at verification, so a deployment learns when
+    // it enrols a source rather than when a signal is dropped. Registration is
+    // not the enforcement point -- a row can predate this check or arrive with
+    // a restore -- which is why the same rule is applied to every signal.
+    if (
+      config.SIGNAL_LEGACY_HMAC !== 'permitted' &&
+      !(DEFAULT_SIGNAL_ALGORITHMS as readonly string[]).includes(body.algorithm)
+    ) {
+      throw new ScrutexityError(
+        'INVALID_REQUEST',
+        `${body.algorithm} signal keys cannot be registered; use ED25519`,
+        {
+          disclose: true,
+          reasonCode: 'HMAC_KEY_REFUSED',
+          internal: {
+            securityEvent: {
+              organizationId: request.principal.organization_id,
+              kind: 'HMAC_KEY_REGISTRATION_REFUSED',
+              source: body.source,
+              subjectId: request.principal.id,
+              // Never the key material, for either algorithm.
+              detail: { algorithm: body.algorithm, key_id: body.key_id },
+            },
+          },
+        },
+      );
+    }
+    const { status, body: payload } = await mutate(
+      request as never,
+      'POST /v1/signal-keys',
+      async (client) => {
+        try {
+          const result = await client.query(
+            `INSERT INTO scrutexity.signal_signing_keys
+               (id, organization_id, source, key_id, algorithm, key_material,
+                not_before, not_after)
+             VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz, now()),$8)
+             RETURNING id, source, key_id, algorithm, status, not_before, not_after, created_at`,
+            [
+              newId('signalKey'),
+              request.principal.organization_id,
+              body.source,
+              body.key_id,
+              body.algorithm,
+              body.key_material,
+              body.not_before ?? null,
+              body.not_after ?? null,
+            ],
+          );
+          // The key material is never echoed back, for either algorithm. A
+          // caller that just supplied it does not need it returned, and an
+          // HMAC secret in a response body is a secret in a log.
+          return { status: 201, body: { signal_key: result.rows[0] } };
+        } catch (error) {
+          if ((error as { code?: string }).code === '23505') {
+            throw new ScrutexityError(
+              'STATE_CONFLICT',
+              `key "${body.key_id}" is already registered for source "${body.source}"`,
+            );
+          }
+          throw error;
+        }
+      },
+    );
+    reply.code(status).send(payload);
+  });
+
+  app.get('/v1/signal-keys', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `SELECT id, source, key_id, algorithm, status, not_before, not_after,
+                created_at, revoked_at
+           FROM scrutexity.signal_signing_keys
+          ORDER BY created_at DESC LIMIT 200`,
+      );
+      return { signal_keys: result.rows };
+    });
+  });
+
+  /**
+   * Retires a key with a grace period rather than revoking it outright. The
+   * overlap is what lets a source finish switching over without dropping
+   * signals; use revoke when a key is believed compromised and no overlap is
+   * acceptable.
+   */
+  app.post<{ Params: { id: string } }>('/v1/signal-keys/:id/retire', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    const body = RotateSignalKeySchema.parse(request.body ?? {});
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.signal_signing_keys
+            SET status = 'RETIRING',
+                not_after = now() + make_interval(secs => $2)
+          WHERE id = $1 AND status = 'ACTIVE'
+          RETURNING id, source, key_id, status, not_after`,
+        [request.params.id, body.grace_period_seconds],
+      );
+      if (result.rowCount === 0) {
+        throw new ScrutexityError('NOT_FOUND', 'no active signing key with that id');
+      }
+      return { signal_key: result.rows[0] };
+    });
+  });
+
+  app.post<{ Params: { id: string } }>('/v1/signal-keys/:id/revoke', async (request) => {
+    requireScope(request.principal, SCOPES.adminWrite);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `UPDATE scrutexity.signal_signing_keys
+            SET status = 'REVOKED', revoked_at = now()
+          WHERE id = $1 AND status <> 'REVOKED'
+          RETURNING id, source, key_id, status, revoked_at`,
+        [request.params.id],
+      );
+      if (result.rowCount === 0) {
+        throw new ScrutexityError('NOT_FOUND', 'no revocable signing key with that id');
+      }
+      await recordSecurityEvent(client, {
+        organizationId: request.principal.organization_id,
+        kind: 'SIGNAL_KEY_REVOKED',
+        source: result.rows[0]!.source as string,
+        detail: { key_id: result.rows[0]!.key_id, revoked_by: request.principal.id },
+      });
+      return { signal_key: result.rows[0] };
+    });
+  });
+
+  app.get('/v1/security-events', async (request) => {
+    // The forensic record of attacks, including this caller's own. Never an
+    // agent.
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
+      const result = await client.query(
+        `SELECT id, kind, source, subject_id, detail, created_at
+           FROM scrutexity.security_events
+          ORDER BY created_at DESC LIMIT 200`,
+      );
+      return { security_events: result.rows };
+    });
+  });
 
   // ==========================================================================
   // Dashboard read model
   // ==========================================================================
 
-  app.get('/v1/overview', async (request) =>
-    db.withTenant(request.principal.organization_id, async (client) => {
+  app.get('/v1/overview', async (request) => {
+    requireOperatorRead(request.principal);
+    return db.withTenant(request.principal.organization_id, async (client) => {
       const agents = await client.query(
         'SELECT * FROM scrutexity.agents ORDER BY created_at ASC LIMIT 50',
       );
@@ -880,8 +1399,8 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         recent_decisions: decisions.rows,
         live_signals: signals.rows.map(serializeSignal),
       };
-    }),
-  );
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

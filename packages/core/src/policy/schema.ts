@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { toDecimalString } from '../decimal.js';
 import { MoneyInputSchema, MoneySchema } from '../money.js';
-import { ACTION_PATTERN, ConstraintsSchema } from '../authority/grant.js';
+import { ACTION_PATTERN, ConstraintsSchema, GrantSchema } from '../authority/grant.js';
+import { IntentDeclarationSchema } from '../intent.js';
 
 /**
  * ============================================================================
@@ -246,7 +247,19 @@ export type PolicyRule = z.infer<typeof RuleSchema>;
 
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
-export const PolicyDocumentSchema = z
+/**
+ * The authored document, before normalisation.
+ *
+ * Split out from `PolicyDocumentSchema` only so the top-level field names can
+ * be exported. The published JSON Schema in `spec/` is a hand-written mirror
+ * of this -- it has to be, because the authored and stored forms differ -- and
+ * two sources of truth drift. They did: `intent`, `intents` and
+ * `intent_required` were accepted here and rejected by the published contract,
+ * so a customer validating a valid intent-bound policy was told it was
+ * invalid. `POLICY_DOCUMENT_FIELDS` is what the contract test compares
+ * against so that cannot happen again silently.
+ */
+const AuthoredPolicyDocumentSchema = z
   .object({
     apiVersion: z.literal(POLICY_API_VERSION),
     id: z.string().regex(/^[a-z][a-z0-9_]{2,63}$/),
@@ -295,28 +308,159 @@ export const PolicyDocumentSchema = z
       })
       .strict()
       .default({}),
+    /**
+     * ========================================================================
+     * Issuable authority -- the top of the theorem.
+     * ========================================================================
+     *
+     * The containment lattice guarantees that a delegated grant never exceeds
+     * its parent, and that an execution never exceeds its lease. But a lease
+     * issued from nothing has no parent to be contained by, so until this
+     * existed the whole chain hung from a root bounded only by an API scope:
+     * anyone holding `leases:write` could mint any authority at all.
+     *
+     * This is the missing bound. A role may only issue authority that fits
+     * inside the ceiling declared for it here, checked with the same
+     * `containsGrant` the delegation path uses:
+     *
+     *     RequestedLease ⊆ IssuanceCeiling(role)
+     *
+     * Why the policy rather than a table of per-user grants: the policy is
+     * already immutable, versioned, hash-checked, dual-control reviewed and
+     * pinned into every decision record. A separate table would be a second
+     * governance surface with none of those properties -- and "who may grant
+     * what" is exactly the question that must not be quietly editable.
+     *
+     * An absent block means no role may issue anything, which is the correct
+     * failure direction: a policy that forgot to say fails closed rather than
+     * granting the world.
+     *
+     *   issuance:
+     *     ceilings:
+     *       - role: treasury_admin
+     *         grant:
+     *           actions: [wire.*, counterparty.read]
+     *           resources: { bank_account: [acct_001], counterparty: ["*"] }
+     *           constraints:
+     *             max_amount: { currency: USD, amount: "100000.00" }
+     */
+    issuance: z
+      .object({
+        /**
+         * When false, this policy does not govern issuance at all and any
+         * holder of `leases:write` may issue anything.
+         *
+         * It exists only so an existing deployment can adopt the control
+         * deliberately rather than having every issuance start failing on a
+         * library upgrade. It is not a setting to leave alone: a policy with
+         * `enforced: false` is a policy whose authority root is unbounded, and
+         * the migration note says so.
+         */
+        enforced: z.boolean().default(true),
+        ceilings: z
+          .array(
+            z
+              .object({
+                role: z.string().min(1).max(64),
+                grant: GrantSchema,
+              })
+              .strict(),
+          )
+          .max(50)
+          .default([]),
+      })
+      .strict()
+      .default({}),
+    /**
+     * Intent binding (see intent.ts). Two authoring forms normalise to one
+     * stored shape:
+     *
+     *   intent: execute wire transfers        # shorthand: one intent
+     *   allowed_actions: [wire.create]
+     *   forbidden_actions: [wire.execute]
+     *
+     *   intents:                              # explicit: several named intents
+     *     - id: reconcile_cash_position
+     *       allowed_actions: [account.read]
+     *
+     * The shorthand exists because most policies govern a single objective and
+     * should not have to say so twice.
+     */
+    intent: z.string().min(1).max(200).optional(),
+    allowed_actions: z.array(z.string().regex(ACTION_PATTERN)).optional(),
+    forbidden_actions: z.array(z.string().regex(ACTION_PATTERN)).optional(),
+    intents: z.array(IntentDeclarationSchema).max(50).default([]),
+    /** When true, a request that declares no intent is refused. */
+    intent_required: z.boolean().default(false),
     rules: z.array(RuleSchema).min(1).max(500),
   })
-  .strict()
-  .superRefine((doc, ctx) => {
-    const seen = new Set<string>();
-    for (const [index, rule] of doc.rules.entries()) {
-      if (seen.has(rule.id)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `duplicate rule id "${rule.id}"`,
-          path: ['rules', index, 'id'],
-        });
-      }
-      seen.add(rule.id);
-      if (rule.then.decision === 'ESCALATE' && !rule.then.approval) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `rule "${rule.id}" escalates but names no approval requirement`,
-          path: ['rules', index, 'then', 'approval'],
-        });
-      }
+  .strict();
+
+/**
+ * Every top-level key a policy document may carry. Exported so the published
+ * JSON Schema can be checked against it.
+ */
+export const POLICY_DOCUMENT_FIELDS = Object.keys(
+  AuthoredPolicyDocumentSchema.shape,
+) as readonly string[];
+
+export const PolicyDocumentSchema = AuthoredPolicyDocumentSchema.transform((doc) => {
+  // Normalise the shorthand into `intents` so the stored, hashed document has
+  // exactly one shape and the evaluator has exactly one thing to read.
+  if (doc.intent === undefined && !doc.allowed_actions && !doc.forbidden_actions) {
+    return doc;
+  }
+  const shorthand = {
+    id: doc.id,
+    ...(doc.intent ? { description: doc.intent } : {}),
+    allowed_actions: doc.allowed_actions ?? [],
+    forbidden_actions: doc.forbidden_actions ?? [],
+  };
+  const {
+    intent: _intent,
+    allowed_actions: _allowed,
+    forbidden_actions: _forbidden,
+    ...rest
+  } = doc;
+  return { ...rest, intents: [shorthand, ...doc.intents] };
+}).superRefine((doc, ctx) => {
+  const seen = new Set<string>();
+  for (const [index, rule] of doc.rules.entries()) {
+    if (seen.has(rule.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate rule id "${rule.id}"`,
+        path: ['rules', index, 'id'],
+      });
     }
-  });
+    seen.add(rule.id);
+    if (rule.then.decision === 'ESCALATE' && !rule.then.approval) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `rule "${rule.id}" escalates but names no approval requirement`,
+        path: ['rules', index, 'then', 'approval'],
+      });
+    }
+  }
+
+  const intentIds = new Set<string>();
+  for (const [index, declaration] of (doc.intents ?? []).entries()) {
+    if (intentIds.has(declaration.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `duplicate intent id "${declaration.id}"`,
+        path: ['intents', index, 'id'],
+      });
+    }
+    intentIds.add(declaration.id);
+  }
+  if (doc.intent_required && (doc.intents ?? []).length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'intent_required is set but the policy declares no intents',
+      path: ['intent_required'],
+    });
+  }
+});
 
 export type PolicyDocument = z.infer<typeof PolicyDocumentSchema>;
