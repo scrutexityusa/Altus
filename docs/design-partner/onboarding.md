@@ -43,9 +43,24 @@ does the assignment.
 git clone <repo> && cd Altus
 pnpm install
 
-docker compose up -d          # PostgreSQL 16
+docker compose up -d          # PostgreSQL 16 on 127.0.0.1:5432
 pnpm altus migrate
 ```
+
+**Pointing at a PostgreSQL you already run.** Every command takes its
+connection from the environment, and the defaults assume the compose database.
+For anything else, set both — the owner connection applies migrations, the
+application connection is what the service runs as and is subject to row level
+security:
+
+```bash
+export DATABASE_ADMIN_URL=postgres://owner:pass@your-host:5432/your-db
+export DATABASE_URL=postgres://app:pass@your-host:5432/your-db
+```
+
+The application role must **not** be the table owner. RLS is FORCEd and the
+owner bypasses it, so tenant isolation depends on the service connecting as
+someone else. `db/init/00-roles.sql` creates both roles.
 
 ## 2. The installation ceremony
 

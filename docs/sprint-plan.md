@@ -114,7 +114,7 @@ read model; `make demo` green from a clean checkout; CI.
 **Done when** — all met:
 
 - [x] 290 tests pass at this milestone, including 10-way concurrency against one
-      single-use grant (554 today — see the README)
+      single-use grant (596 today — see the README)
 - [x] Every migration rolls back and reapplies, verified in CI
 - [x] The test suite provisions and drops its own database
 - [x] Sources _and_ tests typecheck

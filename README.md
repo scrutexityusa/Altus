@@ -32,7 +32,7 @@ build.
 ```bash
 make api          # the control plane, with reload
 make web          # the dashboard
-make test         # 554 tests
+make test         # 596 tests
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the API mid-payment; assert what survived
 make ci           # everything above
@@ -190,7 +190,7 @@ about that operation, and the evidence says so.
 
 ## Testing
 
-554 tests across 19 files, plus two suites that are not tests of units at all.
+596 tests across 19 files, plus two suites that are not tests of units at all.
 `./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with no build
 output and no dependencies installed.
 

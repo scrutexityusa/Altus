@@ -11,11 +11,37 @@
  * This exists so the documented flow is three commands a stranger can type
  * rather than three `tsx scripts/...` invocations they have to be told about.
  */
-import { spawn } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Build the workspace packages if they are not built yet.
+ *
+ * `scripts/*` import `@scrutexity/core` through its package entry point, which
+ * is compiled output -- so on a fresh clone every subcommand except `migrate`
+ * died with a module-resolution stack trace. The documented flow was three
+ * commands and the second one failed.
+ *
+ * Building here rather than adding `pnpm build` to the instructions: a stranger
+ * following the onboarding guide should not have to know which subcommands
+ * happen to need compiled output. It runs once, and only when `dist` is absent.
+ */
+function ensureBuilt(): void {
+  if (existsSync(join(root, 'packages/core/dist/index.js'))) return;
+  process.stderr.write('  building workspace packages (first run)...\n');
+  const result = spawnSync('pnpm', ['exec', 'tsc', '-b', 'tsconfig.build.json'], {
+    cwd: root,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    process.stderr.write('\n  build failed; cannot continue\n');
+    process.exit(result.status ?? 1);
+  }
+}
 
 const COMMANDS: Record<string, { script: string; summary: string }> = {
   migrate: { script: 'scripts/migrate.ts', summary: 'Apply pending schema migrations' },
@@ -60,6 +86,8 @@ if (!entry) {
   process.stderr.write(`\n  unknown command "${command}"\n${USAGE}`);
   process.exit(1);
 }
+
+ensureBuilt();
 
 // Inherit stdio so a subcommand's prompts, colours and exit code are the
 // operator's, not this wrapper's.

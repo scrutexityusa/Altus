@@ -9,7 +9,7 @@ authority, what it persists, how it fails, and which test proves the claim. A
 control with no test is listed as a gap, not as a control.
 
 **Status at audit time:** 428 tests, 14 files, clean CI.
-**Current:** 554 tests across 19 files; 11/11 adversarial invariants; 3/3 recovery scenarios.
+**Current:** 596 tests across 22 files; 11/11 adversarial invariants; 3/3 recovery scenarios.
 
 ## How to read a gap's status
 

@@ -12,6 +12,7 @@ documents are written to.
 | Us, internally        | [`ideal-partner-profile.md`](ideal-partner-profile.md) — who this is for, and who it is not               | 10 min |
 | Anyone, live          | [`demo-script.md`](demo-script.md) — `make demo`, scene by scene                                          | 10 min |
 | Engineering           | [`onboarding.md`](onboarding.md) — empty database to one governed execution                               | 30 min |
+| Anyone                | [`cold-room-transcript.md`](cold-room-transcript.md) — a recorded run of it from a fresh clone            | 3 min  |
 | Engineering           | [`api-quickstart.md`](api-quickstart.md) — working curl for the whole surface                             | 30 min |
 | Treasury              | [`policy-pack-treasury.md`](policy-pack-treasury.md) — the tier ladder and why each rule exists           | 20 min |
 | Engineering           | [`integration-runbook.md`](integration-runbook.md) — provider and KMS seams, reconciliation, monitoring   | 45 min |
@@ -33,7 +34,7 @@ own opinion. That is the intent — the system's own proof is the pitch.
 
 ## Honest state, in one place
 
-- **554 tests**, 11/11 adversarial invariants, 3/3 recovery scenarios.
+- **596 tests**, 11/11 adversarial invariants, 3/3 recovery scenarios.
 - **No key manager is wired.** Production requires one and refuses to start
   without it, so **no deployment has run in a production posture.** Wiring a
   partner's chosen manager is scoped week-one work
