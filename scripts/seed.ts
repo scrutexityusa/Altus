@@ -190,7 +190,7 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
     }
 
     // -- Policy, through its real lifecycle ---------------------------------
-    const policySource = readFileSync(join(root, 'policies', 'treasury_wire.yaml'), 'utf8');
+    const policySource = readFileSync(join(root, 'policies', 'treasury-wire.yaml'), 'utf8');
     const { document, hash } = loadPolicyYaml(policySource);
 
     const policyId = newId('policy');

@@ -6,17 +6,18 @@ documents are written to.
 
 ## Read in this order
 
-| Audience       | Document                                                                                                  | Time   |
-| -------------- | --------------------------------------------------------------------------------------------------------- | ------ |
-| Everyone       | [`security-brief.md`](security-brief.md) — what it is, what it guarantees, what it does not               | 5 min  |
-| Us, internally | [`ideal-partner-profile.md`](ideal-partner-profile.md) — who this is for, and who it is not               | 10 min |
-| Anyone, live   | [`demo-script.md`](demo-script.md) — `make demo`, scene by scene                                          | 10 min |
-| Engineering    | [`api-quickstart.md`](api-quickstart.md) — working curl for the whole surface                             | 30 min |
-| Treasury       | [`policy-pack-treasury.md`](policy-pack-treasury.md) — the tier ladder and why each rule exists           | 20 min |
-| Engineering    | [`integration-runbook.md`](integration-runbook.md) — provider and KMS seams, reconciliation, monitoring   | 45 min |
-| Security       | [`red-team-handoff.md`](red-team-handoff.md) — threat model, coverage, residual risk, the review question | 45 min |
-| All            | [`pilot-plan.md`](pilot-plan.md) — four weeks and six success criteria                                    | 15 min |
-| Us, internally | [`outreach/`](outreach/) — cold emails, one-pager, discovery questions                                    | —      |
+| Audience              | Document                                                                                                  | Time   |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
+| Everyone              | [`security-brief.md`](security-brief.md) — what it is, what it guarantees, what it does not               | 5 min  |
+| Us, internally        | [`ideal-partner-profile.md`](ideal-partner-profile.md) — who this is for, and who it is not               | 10 min |
+| Anyone, live          | [`demo-script.md`](demo-script.md) — `make demo`, scene by scene                                          | 10 min |
+| Engineering           | [`api-quickstart.md`](api-quickstart.md) — working curl for the whole surface                             | 30 min |
+| Treasury              | [`policy-pack-treasury.md`](policy-pack-treasury.md) — the tier ladder and why each rule exists           | 20 min |
+| Engineering           | [`integration-runbook.md`](integration-runbook.md) — provider and KMS seams, reconciliation, monitoring   | 45 min |
+| Security              | [`red-team-handoff.md`](red-team-handoff.md) — threat model, coverage, residual risk, the review question | 45 min |
+| All                   | [`pilot-plan.md`](pilot-plan.md) — four weeks and six success criteria                                    | 15 min |
+| Anyone, first contact | [`outreach/authority-model.md`](outreach/authority-model.md) — the technical thesis in one image          | 2 min  |
+| Us, internally        | [`outreach/`](outreach/) — cold emails, one-pager, discovery questions                                    | —      |
 
 ## The three commands
 

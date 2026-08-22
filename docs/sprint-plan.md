@@ -49,7 +49,7 @@ with tenant-scoped transactions.
 
 ## Sprint 3 — Treasury wire, no UI
 
-**Delivered.** `policies/treasury_wire.yaml`, the action catalog, approval
+**Delivered.** `policies/treasury-wire.yaml`, the action catalog, approval
 requirements and merging, failover behaviour, `scripts/demo.ts`.
 
 **Done when** — all met:
@@ -113,7 +113,8 @@ read model; `make demo` green from a clean checkout; CI.
 
 **Done when** — all met:
 
-- [x] 290 tests pass, including 10-way concurrency against one single-use grant
+- [x] 290 tests pass at this milestone, including 10-way concurrency against one
+      single-use grant (554 today — see the README)
 - [x] Every migration rolls back and reapplies, verified in CI
 - [x] The test suite provisions and drops its own database
 - [x] Sources _and_ tests typecheck

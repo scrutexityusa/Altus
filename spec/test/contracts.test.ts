@@ -74,12 +74,12 @@ describe('policy JSON Schema', () => {
   });
 
   it('rejects a document with an unknown top-level key', () => {
-    const document = parseYaml(readFileSync(join(root, 'policies/treasury_wire.yaml'), 'utf8'));
+    const document = parseYaml(readFileSync(join(root, 'policies/treasury-wire.yaml'), 'utf8'));
     expect(validate({ ...document, backdoor: true })).toBe(false);
   });
 
   it('rejects a rule with no decision', () => {
-    const document = parseYaml(readFileSync(join(root, 'policies/treasury_wire.yaml'), 'utf8'));
+    const document = parseYaml(readFileSync(join(root, 'policies/treasury-wire.yaml'), 'utf8'));
     document.rules[0].then = {};
     expect(validate(document)).toBe(false);
   });
