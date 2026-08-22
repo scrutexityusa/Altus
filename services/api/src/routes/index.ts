@@ -42,10 +42,21 @@ import { recordSecurityEvent, securityEventOf } from '../services/security-event
 import { enforceExecution } from '../adapter/enforce.js';
 import type { ProviderRegistry } from '../adapter/provider.js';
 import { metrics } from '../metrics.js';
+import type { Config } from '../config.js';
 
 export interface RouteDeps {
   db: Database;
   keys: EvidenceKeys;
+  /**
+   * The validated deployment configuration.
+   *
+   * Routes read it for posture decisions that must not be re-derived per
+   * request -- whether unauthenticated signals are admitted, whether HMAC key
+   * registration is permitted. Passing the whole config rather than a handful
+   * of booleans keeps one source of truth: a posture flag added to `config.ts`
+   * cannot be silently missing here.
+   */
+  config: Config;
   /**
    * The execution providers this deployment is configured with. Registered at
    * boot rather than looked up per request, so an operation with no provider
@@ -55,6 +66,13 @@ export interface RouteDeps {
   providers: ProviderRegistry;
 }
 
+/**
+ * The signing algorithms accepted unless a deployment has explicitly opted
+ * into the legacy one. A list rather than a constant so that adding to it is a
+ * visible decision, not so that it is easy.
+ */
+const DEFAULT_SIGNAL_ALGORITHMS = ['ED25519'] as const;
+
 declare module 'fastify' {
   interface FastifyRequest {
     principal: Principal;
@@ -62,7 +80,7 @@ declare module 'fastify' {
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
-  const { db, keys, providers } = deps;
+  const { db, keys, providers, config } = deps;
 
   /**
    * Ordinary reads: an agent's own decisions, leases, traces and receipts.
@@ -792,6 +810,16 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
           eventId: body.event_id ?? null,
           signature: body.signature ?? null,
           signingKeyId: body.signing_key_id ?? null,
+          // Required unless the deployment has explicitly chosen otherwise.
+          // Production cannot choose otherwise; config.ts refuses to boot.
+          requireAuthentication: config.SIGNAL_AUTHENTICATION === 'required',
+          // Checked here rather than only at registration. Refusing HMAC when
+          // a key is enrolled stops new ones; refusing it when a signal
+          // arrives also stops the ones already in the table -- written before
+          // that check existed, or restored from a backup taken before it.
+          // See ADR-0018.
+          allowedAlgorithms:
+            config.SIGNAL_LEGACY_HMAC === 'permitted' ? undefined : DEFAULT_SIGNAL_ALGORITHMS,
         });
         return { status: 201, body: result };
       }),
@@ -1173,6 +1201,43 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
   app.post('/v1/signal-keys', async (request, reply) => {
     requireScope(request.principal, SCOPES.adminWrite);
     const body = RegisterSignalKeySchema.parse(request.body);
+
+    // Ed25519 is the authentication path. HMAC exists only for a deployment
+    // that has explicitly opted into it while migrating a legacy source.
+    //
+    // HMAC requires the verifier to hold the same secret that produces
+    // signatures, so Scrutexity would be storing, for every source, a value
+    // that manufactures signals reducing authority over real money. A database
+    // disclosure would hand an attacker the ability to forge them. With
+    // Ed25519 only the public half is stored and a disclosure yields nothing.
+    //
+    // Refused here *as well as* at verification, so a deployment learns when
+    // it enrols a source rather than when a signal is dropped. Registration is
+    // not the enforcement point -- a row can predate this check or arrive with
+    // a restore -- which is why the same rule is applied to every signal.
+    if (
+      config.SIGNAL_LEGACY_HMAC !== 'permitted' &&
+      !(DEFAULT_SIGNAL_ALGORITHMS as readonly string[]).includes(body.algorithm)
+    ) {
+      throw new ScrutexityError(
+        'INVALID_REQUEST',
+        `${body.algorithm} signal keys cannot be registered; use ED25519`,
+        {
+          disclose: true,
+          reasonCode: 'HMAC_KEY_REFUSED',
+          internal: {
+            securityEvent: {
+              organizationId: request.principal.organization_id,
+              kind: 'HMAC_KEY_REGISTRATION_REFUSED',
+              source: body.source,
+              subjectId: request.principal.id,
+              // Never the key material, for either algorithm.
+              detail: { algorithm: body.algorithm, key_id: body.key_id },
+            },
+          },
+        },
+      );
+    }
     const { status, body: payload } = await mutate(
       request as never,
       'POST /v1/signal-keys',

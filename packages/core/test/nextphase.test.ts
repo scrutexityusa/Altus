@@ -577,9 +577,9 @@ describe('signal authentication', () => {
     });
   });
 
-  it('reports an unconfigured source distinctly, so the tenant can decide', () => {
+  it('reports an unenrolled source distinctly, so the deployment can decide', () => {
     expect(verifySignal(envelope, null, null, [], T0)).toMatchObject({
-      reason: 'no_key_configured',
+      reason: 'source_not_enrolled',
     });
   });
 
@@ -625,11 +625,10 @@ describe('signal authentication', () => {
   });
 
   it('does not let one source sign for another', () => {
-    // This used to expect `no_key_configured`, which is the *non-fatal*
-    // reason: a source that has not enrolled is allowed through as
-    // unauthenticated. So a signal bearing another source's perfectly valid
-    // signature was being accepted, because the receiving source happened to
-    // have no keys of its own.
+    // This used to expect the not-enrolled reason, which is the one reason a
+    // permissive deployment tolerates. So a signal bearing another source's
+    // perfectly valid signature was being accepted, because the receiving
+    // source happened to have no keys of its own.
     //
     // Presenting a signature is a claim of authenticity, and a claim that
     // cannot be checked fails rather than passes. `unknown_key_id` is fatal.
@@ -653,13 +652,13 @@ describe('signal authentication', () => {
     expect(verification).toMatchObject({ reason: 'unknown_key_id' });
   });
 
-  it('still admits an unenrolled source that presents no signature', () => {
-    // The unauthenticated path is a deliberate posture for sources that have
-    // not yet enrolled, and it is distinguishable in evidence. Tightening the
-    // default is G-5's job; what must not happen is a *presented* signature
-    // being ignored.
+  it('reports an unenrolled source that presents no signature as unenrolled', () => {
+    // The one reason a deployment may choose to tolerate, and only outside
+    // production. It is reported distinctly rather than collapsed into
+    // `unknown_key_id` so that the posture decision is made by the caller
+    // against a named fact, not inferred from the absence of a key id.
     const verification = verifySignal(envelope, null, null, [], T0);
-    expect(verification).toMatchObject({ reason: 'no_key_configured' });
+    expect(verification).toMatchObject({ reason: 'source_not_enrolled' });
   });
 });
 

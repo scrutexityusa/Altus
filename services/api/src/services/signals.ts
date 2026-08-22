@@ -4,6 +4,9 @@ import {
   newId,
   toDecimalString,
   verifySignal,
+  type ErrorCode,
+  type SignalKeyAlgorithm,
+  type SignalRejectionReason,
   type SignalSigningKey,
 } from '@scrutexity/core';
 import type { PoolClient } from '../db/pool.js';
@@ -43,10 +46,40 @@ export interface IngestSignalInput {
    * is the tenant's call, not this service's.
    */
   requireAuthentication?: boolean;
+  /**
+   * The signing algorithms this deployment accepts, narrowing what the
+   * enrolled keys can do. Production passes Ed25519 only, which is what
+   * refuses a legacy HMAC key that predates the registration check.
+   */
+  allowedAlgorithms?: readonly SignalKeyAlgorithm[];
 }
 
 const SIGNAL_TYPE = /^[a-z][a-z0-9_]{2,63}$/;
 const MAX_TTL_SECONDS = 86_400;
+
+/**
+ * Every rejection reason maps to exactly one error code.
+ *
+ * Exhaustive by type rather than by a conditional expression, so a reason
+ * added to the core vocabulary fails the build here instead of silently
+ * falling into whatever the `else` branch happened to be. The previous
+ * two-branch conditional would have reported a revoked key as an invalid
+ * signature, which sends an operator looking for a forgery that never
+ * happened.
+ */
+const SIGNAL_REJECTION_CODES: Record<SignalRejectionReason, ErrorCode> = {
+  source_not_enrolled: 'SIGNAL_SOURCE_NOT_ENROLLED',
+  unknown_key_id: 'SIGNAL_KEY_UNKNOWN',
+  key_revoked: 'SIGNAL_KEY_UNKNOWN',
+  key_not_yet_valid: 'SIGNAL_KEY_UNKNOWN',
+  key_expired: 'SIGNAL_KEY_UNKNOWN',
+  signature_invalid: 'SIGNAL_SIGNATURE_INVALID',
+  signature_missing: 'SIGNAL_SIGNATURE_INVALID',
+  // A key the deployment will not accept is, for the purposes of this signal,
+  // not a key. The reason_code carries the specific fact for the operator who
+  // has to go and rotate the source onto Ed25519.
+  algorithm_not_permitted: 'SIGNAL_KEY_UNKNOWN',
+};
 
 export async function ingestSignal(
   client: PoolClient,
@@ -119,11 +152,23 @@ export async function ingestSignal(
     input.signingKeyId ?? null,
     signingKeys,
     now,
+    input.allowedAlgorithms ? { allowedAlgorithms: input.allowedAlgorithms } : {},
   );
 
   if (!verification.verified) {
-    const fatal =
-      verification.reason !== 'no_key_configured' || input.requireAuthentication === true;
+    // Enrolment is mandatory. `source_not_enrolled` is the only reason a
+    // deployment may choose to tolerate, and production cannot choose to (see
+    // config.ts). Every other reason -- a bad signature, an unknown key id, a
+    // revoked or expired key -- is fatal under every posture, because each one
+    // is a claim of authenticity that failed rather than one never made.
+    //
+    // The old default was the opposite by omission: an unenrolled source was
+    // simply treated as non-fatal, so anyone holding `signals:write` could
+    // assert any signal about any subject. A signal reduces authority, so that
+    // is a denial of service against a legitimate agent delivered through the
+    // control plane itself.
+    const tolerable = verification.reason === 'source_not_enrolled';
+    const fatal = !tolerable || input.requireAuthentication !== false;
     metrics.signalInvalidSignature.inc({ reason: verification.reason, source: input.source });
 
     const securityEvent: SecurityEventInput = {
@@ -149,9 +194,7 @@ export async function ingestSignal(
       // it -- so the caller writes it afterwards on its own transaction. A
       // rejected signal must leave a trace even though it leaves no signal.
       throw new ScrutexityError(
-        verification.reason === 'unknown_key_id'
-          ? 'SIGNAL_KEY_UNKNOWN'
-          : 'SIGNAL_SIGNATURE_INVALID',
+        SIGNAL_REJECTION_CODES[verification.reason],
         `signal rejected: ${verification.reason}`,
         {
           reasonCode: verification.reason.toUpperCase(),

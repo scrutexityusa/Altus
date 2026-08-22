@@ -1,4 +1,11 @@
-import { createHmac, createPublicKey, timingSafeEqual, verify as edVerify } from 'node:crypto';
+import {
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  sign as edSign,
+  timingSafeEqual,
+  verify as edVerify,
+} from 'node:crypto';
 import { canonicalize } from './canonical.js';
 import { isExpired } from './time.js';
 
@@ -78,13 +85,33 @@ export function signalSigningPayload(envelope: SignalEnvelope): string {
 }
 
 export const SIGNAL_REJECTION_REASONS = [
-  'no_key_configured',
+  /**
+   * The source has no signing key registered at all.
+   *
+   * Named for the fact rather than for the configuration state that produced
+   * it: `no_key_configured`, which this replaces, read as an operator oversight
+   * that could reasonably be tolerated. It is not. A source with no key is a
+   * source nothing can be attributed to, and enrolment -- not tolerance -- is
+   * the fix. See ADR-0018.
+   */
+  'source_not_enrolled',
   'unknown_key_id',
   'key_revoked',
   'key_not_yet_valid',
   'key_expired',
   'signature_invalid',
   'signature_missing',
+  /**
+   * The key is enrolled and the signature may even be mathematically valid,
+   * but the deployment does not permit that algorithm.
+   *
+   * This is what rejects a legacy HMAC key. Refusing HMAC at *registration*
+   * only stops new ones; a row written before that check existed, or restored
+   * from a backup taken before it, would still authenticate. Enforcement has
+   * to be at verification, where every signal passes, and not at the one
+   * moment a key happens to be created.
+   */
+  'algorithm_not_permitted',
 ] as const;
 
 export type SignalRejectionReason = (typeof SIGNAL_REJECTION_REASONS)[number];
@@ -110,24 +137,37 @@ export function isKeyUsable(key: SignalSigningKey, now: Date): SignalRejectionRe
 }
 
 /**
- * Verifies a signal against the keys configured for its source.
+ * Verifies a signal against the keys registered for its source.
  *
- * When a source has no keys at all the signal is reported unverified rather
- * than rejected outright: whether an unauthenticated source may influence
- * authority is a tenant's decision, not this function's. The caller enforces
- * it, and records the choice either way.
+ * Reports rather than throws. Whether an unenrolled source may still influence
+ * authority is a deployment posture, not a property of the mathematics, and
+ * this function has no business knowing which posture is in force -- so it
+ * returns the reason and the caller enforces it. Production has exactly one
+ * posture (see config.ts), and the caller records the choice either way.
  */
+export interface VerifySignalOptions {
+  /**
+   * The algorithms this deployment accepts. Defaults to all of them.
+   *
+   * Narrowing this is how a deployment refuses key material it has decided it
+   * should never have held. It is checked before the signature is verified, so
+   * a refused algorithm never runs its verification at all.
+   */
+  allowedAlgorithms?: readonly SignalKeyAlgorithm[];
+}
+
 export function verifySignal(
   envelope: SignalEnvelope,
   signature: string | null,
   keyId: string | null,
   keys: readonly SignalSigningKey[],
   now: Date,
+  options: VerifySignalOptions = {},
 ): SignalVerification {
   const candidates = keys.filter((key) => key.source === envelope.source);
 
   // A presented signature is always verified, even when the source has no
-  // registered key. Checking `no_key_configured` first -- as this did -- meant
+  // registered key. Checking enrolment first -- as this did -- meant
   // a caller could attach any bytes at all and have them ignored, because that
   // reason is treated as non-fatal for sources that have not yet enrolled.
   //
@@ -139,7 +179,7 @@ export function verifySignal(
     return { verified: false, reason: 'unknown_key_id', key_id: keyId };
 
   if (candidates.length === 0)
-    return { verified: false, reason: 'no_key_configured', key_id: null };
+    return { verified: false, reason: 'source_not_enrolled', key_id: null };
   if (!signature) return { verified: false, reason: 'signature_missing', key_id: keyId };
 
   const key = keyId ? candidates.find((candidate) => candidate.key_id === keyId) : undefined;
@@ -147,6 +187,10 @@ export function verifySignal(
 
   const unusable = isKeyUsable(key, now);
   if (unusable) return { verified: false, reason: unusable, key_id: key.key_id };
+
+  const allowed = options.allowedAlgorithms ?? SIGNAL_KEY_ALGORITHMS;
+  if (!allowed.includes(key.algorithm))
+    return { verified: false, reason: 'algorithm_not_permitted', key_id: key.key_id };
 
   const payload = Buffer.from(signalSigningPayload(envelope), 'utf8');
   const ok =
@@ -184,7 +228,35 @@ function verifyHmac(payload: Buffer, signature: string, secret: string): boolean
   }
 }
 
-/** Signs an envelope with an HMAC secret. Used by tests and by source SDKs. */
+/**
+ * Signs an envelope with an Ed25519 private key.
+ *
+ * The production path. Only the public half is ever stored by Scrutexity, so
+ * a database disclosure yields nothing an attacker can sign with -- which is
+ * the whole reason this is preferred over HMAC, where the verifier necessarily
+ * holds the secret that produces signatures.
+ *
+ * Lives here so a source SDK and the test suite sign exactly the way the
+ * verifier expects. Two implementations of "what bytes get signed" eventually
+ * disagree, and the disagreement looks like a forged signal.
+ */
+export function signSignalEd25519(envelope: SignalEnvelope, privateKeyPem: string): string {
+  return edSign(
+    null,
+    Buffer.from(signalSigningPayload(envelope), 'utf8'),
+    createPrivateKey(privateKeyPem),
+  ).toString('base64url');
+}
+
+/**
+ * Signs an envelope with an HMAC secret.
+ *
+ * Development and legacy only. HMAC requires the verifier to hold the same
+ * secret that produces signatures, so the party checking authenticity can also
+ * manufacture it -- acceptable for a local fixture, not for a source whose
+ * signals reduce authority over real money. Production refuses to register
+ * HMAC keys at all; see ADR-0018.
+ */
 export function signSignalHmac(envelope: SignalEnvelope, secret: string): string {
   return createHmac('sha256', secret)
     .update(Buffer.from(signalSigningPayload(envelope), 'utf8'))

@@ -1,9 +1,10 @@
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
-import { signSignalHmac, signalSigningPayload } from '@scrutexity/core';
+import { signalSigningPayload } from '@scrutexity/core';
 import {
   issueTreasuryLease,
+  signedSignal,
   startHarness,
   wireRequest,
   ADMIN_URL,
@@ -170,13 +171,18 @@ describe('approval-to-execution binding (TOCTOU)', () => {
     expect(approval.body.decision.decision).toBe('ALLOW');
 
     // The risk picture moves between the human saying yes and the money moving.
-    const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: h.tenant.agents['treasury'] },
-      signal_type: 'fraud_risk',
-      value: '0.97',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    const ingested = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: h.tenant.agents['treasury']! },
+        signal_type: 'fraud_risk',
+        value: '0.97',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(ingested.status).toBe(201);
 
     const execution = await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
@@ -215,13 +221,18 @@ describe('approval-to-execution binding (TOCTOU)', () => {
       wireRequest({ nonce: 'nextphase-toctou-3' }),
     );
 
-    const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: h.tenant.agents['treasury'] },
-      signal_type: 'counterparty_risk',
-      value: '0.2',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    const ingested = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: h.tenant.agents['treasury']! },
+        signal_type: 'counterparty_risk',
+        value: '0.2',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(ingested.status).toBe(201);
 
     const execution = await h.call('POST', '/v1/executions', h.tenant.tokens['treasury_agent']!, {
@@ -459,13 +470,18 @@ describe('root-cause trace', () => {
 
   it('includes only the signals the decision actually read', async () => {
     await issueTreasuryLease(h);
-    const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: h.tenant.agents['treasury'] },
-      signal_type: 'fraud_risk',
-      value: '0.95',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    const ingested = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: h.tenant.agents['treasury']! },
+        signal_type: 'fraud_risk',
+        value: '0.95',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     const decayed = await evaluate(
       h.tenant.tokens['treasury_agent']!,
       wireRequest({ nonce: 'nextphase-trace-4' }),
@@ -525,32 +541,46 @@ describe('root-cause trace', () => {
 
 describe('signal authentication over the API', () => {
   const source = 'signed_fraud_engine';
-  const secret = 'a-shared-secret-of-adequate-length';
-
-  it('accepts a correctly signed signal and marks it authenticated', async () => {
-    const registered = await h.call('POST', '/v1/signal-keys', h.tenant.tokens['admin']!, {
-      source,
-      key_id: 'k1',
-      algorithm: 'HMAC_SHA256',
-      key_material: secret,
-    });
-    expect(registered.status).toBe(201);
-    // The secret is never echoed back.
-    expect(JSON.stringify(registered.body)).not.toContain(secret);
-
-    const issuedAt = new Date().toISOString();
-    const envelope = {
+  // Ed25519 throughout. These cases are about the key *lifecycle* -- enrolment,
+  // grace period, revocation, replay -- not about which algorithm is in use,
+  // and running them on HMAC meant the suite's only exercise of that lifecycle
+  // was on the algorithm the product refuses. See ADR-0018.
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const sign = (envelope: Parameters<typeof signalSigningPayload>[0]) =>
+    edSign(null, Buffer.from(signalSigningPayload(envelope), 'utf8'), privateKey).toString(
+      'base64url',
+    );
+  const envelopeFor = (fields: Record<string, unknown>) =>
+    ({
       organization_id: h.tenant.organization_id,
       subject_type: 'agent',
       subject_id: h.tenant.agents['treasury']!,
-      signal_type: 'fraud_risk',
-      value: '0.4',
       confidence: '1',
       source,
+      ttl_seconds: 600,
+      ...fields,
+    }) as Parameters<typeof signalSigningPayload>[0];
+
+  it('accepts a correctly signed signal and marks it authenticated', async () => {
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    const registered = await h.call('POST', '/v1/signal-keys', h.tenant.tokens['admin']!, {
+      source,
+      key_id: 'k1',
+      algorithm: 'ED25519',
+      key_material: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    });
+    expect(registered.status).toBe(201);
+    // Neither half is echoed back, and the private half was never sent.
+    expect(JSON.stringify(registered.body)).not.toContain(privateKeyPem);
+    expect(JSON.stringify(registered.body)).not.toContain('key_material');
+
+    const issuedAt = new Date().toISOString();
+    const envelope = envelopeFor({
+      signal_type: 'fraud_risk',
+      value: '0.4',
       event_id: 'evt-signed-1',
       issued_at: issuedAt,
-      ttl_seconds: 600,
-    };
+    });
 
     const response = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
       subject: { type: 'agent', id: envelope.subject_id },
@@ -561,7 +591,7 @@ describe('signal authentication over the API', () => {
       ttl_seconds: 600,
       issued_at: issuedAt,
       event_id: 'evt-signed-1',
-      signature: signSignalHmac(envelope, secret),
+      signature: sign(envelope),
       signing_key_id: 'k1',
     });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
@@ -614,18 +644,12 @@ describe('signal authentication over the API', () => {
 
   it('refuses a replayed delivery of a signal it already accepted', async () => {
     const issuedAt = new Date().toISOString();
-    const envelope = {
-      organization_id: h.tenant.organization_id,
-      subject_type: 'agent',
-      subject_id: h.tenant.agents['treasury']!,
+    const envelope = envelopeFor({
       signal_type: 'model_confidence',
       value: '0.8',
-      confidence: '1',
-      source,
       event_id: 'evt-replay-1',
       issued_at: issuedAt,
-      ttl_seconds: 600,
-    };
+    });
     const body = {
       subject: { type: 'agent' as const, id: envelope.subject_id },
       signal_type: 'model_confidence',
@@ -635,7 +659,7 @@ describe('signal authentication over the API', () => {
       ttl_seconds: 600,
       issued_at: issuedAt,
       event_id: 'evt-replay-1',
-      signature: signSignalHmac(envelope, secret),
+      signature: sign(envelope),
       signing_key_id: 'k1',
     };
 
@@ -661,18 +685,12 @@ describe('signal authentication over the API', () => {
     expect(retired.body.signal_key.status).toBe('RETIRING');
 
     const issuedAt = new Date().toISOString();
-    const envelope = {
-      organization_id: h.tenant.organization_id,
-      subject_type: 'agent',
-      subject_id: h.tenant.agents['treasury']!,
+    const envelope = envelopeFor({
       signal_type: 'fraud_risk',
       value: '0.3',
-      confidence: '1',
-      source,
       event_id: 'evt-grace-1',
       issued_at: issuedAt,
-      ttl_seconds: 600,
-    };
+    });
     // Inside the window the outgoing key still works.
     const during = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
       subject: { type: 'agent', id: envelope.subject_id },
@@ -683,7 +701,7 @@ describe('signal authentication over the API', () => {
       ttl_seconds: 600,
       issued_at: issuedAt,
       event_id: 'evt-grace-1',
-      signature: signSignalHmac(envelope, secret),
+      signature: sign(envelope),
       signing_key_id: 'k1',
     });
     expect(during.status).toBe(201);
@@ -705,19 +723,26 @@ describe('signal authentication over the API', () => {
       source,
       ttl_seconds: 600,
       event_id: 'evt-after-revoke',
-      signature: signSignalHmac({ ...envelope, event_id: 'evt-after-revoke' }, secret),
+      signature: sign(
+        envelopeFor({
+          signal_type: 'fraud_risk',
+          value: '0.3',
+          event_id: 'evt-after-revoke',
+          issued_at: issuedAt,
+        }),
+      ),
       signing_key_id: 'k1',
     });
     expect(after.status).toBe(403);
   });
 
   it('accepts an Ed25519 signature, storing only the public key', async () => {
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const { privateKey: edPrivate, publicKey: edPublic } = generateKeyPairSync('ed25519');
     const registered = await h.call('POST', '/v1/signal-keys', h.tenant.tokens['admin']!, {
       source: 'ed_source',
       key_id: 'ed1',
       algorithm: 'ED25519',
-      key_material: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      key_material: edPublic.export({ type: 'spki', format: 'pem' }).toString(),
     });
     expect(registered.status).toBe(201);
 
@@ -737,7 +762,7 @@ describe('signal authentication over the API', () => {
     const signature = edSign(
       null,
       Buffer.from(signalSigningPayload(envelope), 'utf8'),
-      privateKey,
+      edPrivate,
     ).toString('base64url');
 
     const response = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
@@ -757,8 +782,26 @@ describe('signal authentication over the API', () => {
   });
 
   it('keeps signing keys tenant-scoped', async () => {
-    const keys = await h.call('GET', '/v1/signal-keys', h.other.tokens['admin']!);
-    expect(keys.body.signal_keys).toEqual([]);
+    // Both tenants are seeded with their own enrolled sources, so "the other
+    // tenant sees nothing" is no longer the right assertion -- and asserting
+    // an empty list would have started passing again for the wrong reason the
+    // moment enrolment became mandatory. What must hold is that the two sets
+    // are disjoint: no key row crosses the tenant boundary, whether it was
+    // seeded or registered by this suite.
+    const mine = await h.call('GET', '/v1/signal-keys', h.tenant.tokens['admin']!);
+    const theirs = await h.call('GET', '/v1/signal-keys', h.other.tokens['admin']!);
+
+    const ids = (response: { body: { signal_keys: { id: string }[] } }) =>
+      new Set(response.body.signal_keys.map((key) => key.id));
+    const theirIds = ids(theirs);
+    expect([...ids(mine)].some((id) => theirIds.has(id))).toBe(false);
+
+    // The keys this suite registered are in one tenant and only one.
+    const keyIds = (response: { body: { signal_keys: { key_id: string }[] } }) =>
+      response.body.signal_keys.map((key) => key.key_id);
+    expect(keyIds(mine)).toEqual(expect.arrayContaining(['k1', 'ed1']));
+    expect(keyIds(theirs)).not.toContain('k1');
+    expect(keyIds(theirs)).not.toContain('ed1');
   });
 });
 

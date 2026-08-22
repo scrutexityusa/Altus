@@ -23,7 +23,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { buildApp } from '../services/api/src/app.js';
+import { newId, signSignalHmac } from '@scrutexity/core';
 import { seed, type SeedResult } from './seed.js';
+import { signedSignal } from './signal-source.js';
 import {
   ProviderRegistry,
   type ExecutionProvider,
@@ -597,48 +599,154 @@ async function clockDisagreement(c: Ctx) {
 async function signalContainment(c: Ctx) {
   await issueLease(c);
 
-  // 1. Forged signature.
+  // -- The cryptographic layer ---------------------------------------------
+  // 1. A forged signature against an enrolled source.
   const forged = await c.call('POST', '/v1/signals', c.t['fraud_engine']!, {
     subject: { type: 'agent', id: c.fixtures.agents['treasury'] },
     signal_type: 'fraud_risk',
     value: '0.01',
     source: 'external_fraud_engine',
     ttl_seconds: 600,
+    event_id: nonce('a7-forged'),
     signature: 'AAAA'.repeat(16),
     signing_key_id: 'nonexistent-key',
   });
   assert(forged.status >= 400, `a forged signature was accepted (${forged.status})`);
 
-  // 2. A legitimate, valid signal from a trusted source. It must not be able
-  //    to expand authority in any direction.
+  // 2. An unenrolled source. No implicit trust: a source nothing can be
+  //    attributed to influences nothing.
+  const unenrolled = await c.call('POST', '/v1/signals', c.t['fraud_engine']!, {
+    subject: { type: 'agent', id: c.fixtures.agents['treasury'] },
+    signal_type: 'fraud_risk',
+    value: '0.01',
+    source: 'unenrolled_engine',
+    ttl_seconds: 600,
+    event_id: nonce('a7-unenrolled'),
+  });
+  assert(
+    unenrolled.body?.error?.code === 'SIGNAL_SOURCE_NOT_ENROLLED',
+    `an unenrolled source was not refused as such: ${JSON.stringify(unenrolled.body)}`,
+  );
+
+  // 3. A legacy HMAC key written straight to the table, exactly as one that
+  //    predates the registration check would appear. The signature below is
+  //    mathematically correct for that key and is refused anyway, because the
+  //    algorithm rule is enforced where every signal passes rather than at the
+  //    one moment a key happens to be created.
+  const legacySecret = 'a-shared-secret-of-adequate-length';
+  await c.asOwner(async (client) => {
+    await client.query(
+      `INSERT INTO scrutexity.signal_signing_keys
+         (id, organization_id, source, key_id, algorithm, key_material, not_before)
+       VALUES ($1,$2,'legacy_engine','legacy-k1','HMAC_SHA256',$3, now())
+       ON CONFLICT DO NOTHING`,
+      [newId('signalKey'), c.fixtures.organization_id, legacySecret],
+    );
+  });
+  const legacyIssuedAt = new Date(Date.now() - 1000).toISOString();
+  const legacyEventId = nonce('a7-legacy');
+  const legacy = await c.call('POST', '/v1/signals', c.t['fraud_engine']!, {
+    subject: { type: 'agent', id: c.fixtures.agents['treasury'] },
+    signal_type: 'fraud_risk',
+    value: '0.01',
+    confidence: '1',
+    source: 'legacy_engine',
+    ttl_seconds: 600,
+    issued_at: legacyIssuedAt,
+    event_id: legacyEventId,
+    signature: signSignalHmac(
+      {
+        organization_id: c.fixtures.organization_id,
+        subject_type: 'agent',
+        subject_id: c.fixtures.agents['treasury']!,
+        signal_type: 'fraud_risk',
+        value: '0.01',
+        confidence: '1',
+        source: 'legacy_engine',
+        event_id: legacyEventId,
+        issued_at: legacyIssuedAt,
+        ttl_seconds: 600,
+      },
+      legacySecret,
+    ),
+    signing_key_id: 'legacy-k1',
+  });
+  assert(
+    legacy.body?.error?.reason_code === 'ALGORITHM_NOT_PERMITTED',
+    `a legacy HMAC signature was not refused on its algorithm: ${JSON.stringify(legacy.body)}`,
+  );
+
+  // -- The containment layer ------------------------------------------------
+  // Everything below is signed with the real key. This is the fully
+  // compromised issuer: no forgery, every signature verifies, and it still
+  // cannot manufacture authority.
+  const overCeiling = { ...wire().context, amount: '75000.00' };
   const beforeCeiling = await c.call('POST', '/v1/authorization/evaluate', c.t['treasury_agent']!, {
-    ...wire({ nonce: nonce('a7-base'), context: { ...wire().context, amount: '75000.00' } }),
+    ...wire({ nonce: nonce('a7-base'), context: overCeiling }),
   });
   assert(
     beforeCeiling.body.decision !== 'ALLOW',
     'the baseline above the ceiling was already an ALLOW; the scenario proves nothing',
   );
 
-  const ingested = await c.call('POST', '/v1/signals', c.t['fraud_engine']!, {
-    subject: { type: 'agent', id: c.fixtures.agents['treasury'] },
-    signal_type: 'fraud_risk',
-    value: '0.00',
-    source: 'external_fraud_engine',
-    ttl_seconds: 600,
-  });
-  assert(ingested.status === 201, `a valid signal was rejected: ${JSON.stringify(ingested.body)}`);
+  for (const [index, reading] of [
+    { signal_type: 'fraud_risk', value: '0.00' },
+    { signal_type: 'model_confidence', value: '1' },
+    { signal_type: 'counterparty_risk', value: '0.00' },
+  ].entries()) {
+    const ingested = await c.call(
+      'POST',
+      '/v1/signals',
+      c.t['fraud_engine']!,
+      signedSignal(c.fixtures, {
+        subject: { type: 'agent', id: c.fixtures.agents['treasury']! },
+        ...reading,
+        confidence: '1',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+        event_id: nonce(`a7-valid-${index}`),
+      }),
+    );
+    assert(
+      ingested.status === 201,
+      `a correctly signed signal was rejected: ${JSON.stringify(ingested.body)}`,
+    );
+    assert(
+      ingested.body.signal.authenticated === true,
+      'a correctly signed signal was not recorded as authenticated',
+    );
+  }
 
   const afterSignal = await c.call('POST', '/v1/authorization/evaluate', c.t['treasury_agent']!, {
-    ...wire({ nonce: nonce('a7-after'), context: { ...wire().context, amount: '75000.00' } }),
+    ...wire({ nonce: nonce('a7-after'), context: overCeiling }),
   });
   assert(
     afterSignal.body.decision === beforeCeiling.body.decision,
     `a signal changed the decision from ${beforeCeiling.body.decision} to ${afterSignal.body.decision}`,
   );
   assert(afterSignal.body.decision !== 'ALLOW', 'a signal turned a non-ALLOW into an ALLOW');
+
+  // The durable authority did not move either. A decision that stayed the same
+  // while the grant behind it widened is a defect waiting for the next request.
+  await c.asOwner(async (client) => {
+    const rows = await client.query(
+      `SELECT constraints FROM scrutexity.authority_leases
+        WHERE organization_id = $1 AND status = 'ACTIVE'`,
+      [c.fixtures.organization_id],
+    );
+    for (const row of rows.rows) {
+      const ceiling = (row.constraints as { max_amount?: { amountMinor?: string } }).max_amount;
+      assert(
+        ceiling === undefined || BigInt(ceiling.amountMinor ?? '0') <= 5_000_000n,
+        `a signal raised a stored ceiling to ${JSON.stringify(ceiling)}`,
+      );
+    }
+  });
+
   return {
     evidence: 'security event',
-    detail: 'forged rejected; a valid signal could not expand authority',
+    detail:
+      'forged, unenrolled and legacy-HMAC refused; a valid signal from a trusted source could not expand authority',
   };
 }
 

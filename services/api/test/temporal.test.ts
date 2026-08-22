@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import pg from 'pg';
 import {
   issueTreasuryLease,
+  signedSignal,
   startHarness,
   wireRequest,
   ADMIN_URL,
@@ -222,13 +223,18 @@ describe('credential expiry follows the database', () => {
 describe('signal expiry follows the database', () => {
   it('does not let a skewed API clock resurrect an expired signal', async () => {
     await issueTreasuryLease(h);
-    const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: h.tenant.agents['treasury'] },
-      signal_type: 'fraud_risk',
-      value: '0.97',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    const ingested = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: h.tenant.agents['treasury']! },
+        signal_type: 'fraud_risk',
+        value: '0.97',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(ingested.status).toBe(201);
 
     // Expire it in the database. A signal only ever *subtracts* authority, so

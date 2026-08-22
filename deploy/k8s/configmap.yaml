@@ -26,6 +26,18 @@ data:
   # verifiable against the old key.
   RECEIPT_SIGNING_KEY_ID: 'prod-2026-08'
 
+  # Key custody. `kms` is the only value production accepts: `env` and `file`
+  # both mean the private key lives wherever the process does. The name below
+  # is what the key manager knows the receipt signing key by. See ADR-0018.
+  SECRET_PROVIDER: 'kms'
+  RECEIPT_SIGNING_KEY_NAME: 'scrutexity/receipt-signing-key'
+
+  # A signal source must enrol an Ed25519 public key before its signals are
+  # accepted. Neither of these can hold any other value in production; the
+  # service refuses to start.
+  SIGNAL_AUTHENTICATION: 'required'
+  SIGNAL_LEGACY_HMAC: 'refused'
+
   # Registering an OTLP endpoint activates trace export; the code is
   # instrumented with @opentelemetry/api and is a no-op without a provider.
   OTEL_SERVICE_NAME: 'scrutexity-api'

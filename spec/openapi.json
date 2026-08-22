@@ -99,6 +99,7 @@
                   "CONTEXT_CHANGED",
                   "SIGNAL_SIGNATURE_INVALID",
                   "SIGNAL_KEY_UNKNOWN",
+                  "SIGNAL_SOURCE_NOT_ENROLLED",
                   "POLICY_UNAVAILABLE",
                   "SIGNAL_UNAVAILABLE",
                   "ENFORCEMENT_UNAVAILABLE",

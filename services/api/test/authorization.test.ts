@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import {
   issueTreasuryLease,
+  signedSignal,
   startHarness,
   wireRequest,
   ADMIN_URL,
@@ -281,14 +282,19 @@ describe('signals and authority decay', () => {
     );
     expect(before.body.decision).toBe('ALLOW');
 
-    const ingested = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: agentId },
-      signal_type: 'fraud_risk',
-      value: '0.97',
-      confidence: '0.91',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    const ingested = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: agentId },
+        signal_type: 'fraud_risk',
+        value: '0.97',
+        confidence: '0.91',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(ingested.status).toBe(201);
 
     const during = await evaluate(
@@ -325,20 +331,30 @@ describe('signals and authority decay', () => {
 
   it('supersedes an older assertion from the same source', async () => {
     const agentId = h.tenant.agents['verification']!;
-    const first = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: agentId },
-      signal_type: 'model_confidence',
-      value: '0.4',
-      source: 'agent_self_report',
-      ttl_seconds: 600,
-    });
-    const second = await h.call('POST', '/v1/signals', h.tenant.tokens['fraud_engine']!, {
-      subject: { type: 'agent', id: agentId },
-      signal_type: 'model_confidence',
-      value: '0.95',
-      source: 'agent_self_report',
-      ttl_seconds: 600,
-    });
+    const first = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: agentId },
+        signal_type: 'model_confidence',
+        value: '0.4',
+        source: 'agent_self_report',
+        ttl_seconds: 600,
+      }),
+    );
+    const second = await h.call(
+      'POST',
+      '/v1/signals',
+      h.tenant.tokens['fraud_engine']!,
+      signedSignal(h.tenant, {
+        subject: { type: 'agent', id: agentId },
+        signal_type: 'model_confidence',
+        value: '0.95',
+        source: 'agent_self_report',
+        ttl_seconds: 600,
+      }),
+    );
     expect(second.status, JSON.stringify(second.body)).toBe(201);
     expect(second.body.superseded_signal_ids).toContain(first.body.signal.id);
   });

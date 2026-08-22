@@ -16,6 +16,7 @@ import type { PoolClient } from '../db/pool.js';
 import { securityNow } from '../db/security-clock.js';
 import { metrics } from '../metrics.js';
 import type { Config } from '../config.js';
+import type { SecretProvider } from '../keys/provider.js';
 
 /**
  * Evidence append.
@@ -32,17 +33,56 @@ export interface EvidenceKeys {
   keyId: string;
 }
 
-export function loadEvidenceKeys(config: Config): EvidenceKeys {
-  if (config.RECEIPT_SIGNING_KEY_B64) {
-    const pem = Buffer.from(config.RECEIPT_SIGNING_KEY_B64, 'base64').toString('utf8');
-    const privateKey = createPrivateKey(pem);
+/**
+ * Loads the receipt signing key from whatever custody the deployment declared.
+ *
+ * The key is fetched through the SecretProvider rather than read from config
+ * directly, so `env`, a mounted file and a key manager are the same code path
+ * here and the difference is a deployment decision. Production is refused any
+ * provider but `kms` at boot (config.ts), which is what makes "the private key
+ * never lives on this disk" a property of the system rather than of the
+ * runbook.
+ *
+ * Failure is asymmetric on purpose. Outside production an absent key produces
+ * an ephemeral one, because a developer running `pnpm dev` should not have to
+ * provision key custody to see a receipt. In production an absent key throws:
+ * an ephemeral signing key would produce receipts that verify today, fail
+ * after the next deploy, and cannot be traced to anything -- evidence of
+ * nothing, which is worse than no evidence, because it looks like evidence.
+ */
+export async function loadEvidenceKeys(
+  config: Config,
+  secrets: SecretProvider,
+): Promise<EvidenceKeys> {
+  let material: Buffer | null = null;
+  try {
+    material = await secrets.getSecret(config.RECEIPT_SIGNING_KEY_NAME);
+  } catch (error) {
+    if (config.NODE_ENV === 'production') throw error;
+    material = null;
+  }
+
+  if (material && material.length > 0) {
+    // The PEM is derived and immediately consumed. It is never logged, never
+    // returned, and never held on the EvidenceKeys object -- what leaves this
+    // function is a signer, which can produce a signature and cannot be asked
+    // for the key that made it.
+    const privateKey = createPrivateKey(material.toString('utf8'));
     return {
       keyId: config.RECEIPT_SIGNING_KEY_ID,
       signer: ed25519Signer(privateKey, config.RECEIPT_SIGNING_KEY_ID),
       verifier: ed25519Verifier(createPublicKey(privateKey), config.RECEIPT_SIGNING_KEY_ID),
     };
   }
-  // Development only; loadConfig refuses to start production without a key.
+
+  if (config.NODE_ENV === 'production') {
+    throw new Error(
+      `no receipt signing key named "${config.RECEIPT_SIGNING_KEY_NAME}" is available from ` +
+        `the ${secrets.kind} secret provider; production will not sign evidence with an ` +
+        'ephemeral key',
+    );
+  }
+
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   return {
     keyId: config.RECEIPT_SIGNING_KEY_ID,

@@ -8,7 +8,7 @@
  * ACTIVE behind the control that exists to prevent exactly that.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -32,7 +32,29 @@ export interface SeedResult {
   agents: Record<string, string>;
   tokens: Record<string, string>;
   policy_version_id: string;
+  /**
+   * The private halves of the enrolled signal sources' keys, by source name.
+   *
+   * These belong to the *source*, not to Scrutexity: in a real deployment the
+   * fraud engine generates its own keypair and registers only the public half,
+   * and Scrutexity never sees this value at all. The seed holds both ends
+   * because it is standing up both ends -- the tenant and the fixture source
+   * that signs for it -- and they are written to a git-ignored development
+   * file.
+   */
+  signal_source_keys: Record<string, { key_id: string; private_key_pem: string }>;
 }
+
+/**
+ * The signal sources the reference tenant trusts.
+ *
+ * Enrolment is not optional and there is no implicit trust: a source with no
+ * registered key can assert nothing, because nothing it says is attributable
+ * to it. The seed enrols this one for the same reason a real operator would --
+ * so that its signals are accepted -- and not as a convenience that makes the
+ * demo work.
+ */
+const SIGNAL_SOURCES = ['external_fraud_engine', 'agent_self_report'] as const;
 
 export async function seed(connectionString = adminUrl): Promise<SeedResult> {
   const client = new pg.Client({ connectionString });
@@ -289,6 +311,34 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
       );
     }
 
+    // -- Signal source enrolment ------------------------------------------
+    // Ed25519 only. An HMAC key would mean this database holds the secret that
+    // manufactures signals reducing the treasury agent's authority, so a
+    // disclosure of the tenant's data would also be a forgery capability. With
+    // a keypair, only the public half is stored and a disclosure yields
+    // nothing signable. Production refuses to register anything else.
+    const signalSourceKeys: SeedResult['signal_source_keys'] = {};
+    for (const source of SIGNAL_SOURCES) {
+      const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+      const keyId = `${source}-2026-01`;
+      signalSourceKeys[source] = {
+        key_id: keyId,
+        private_key_pem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      };
+      await client.query(
+        `INSERT INTO scrutexity.signal_signing_keys
+           (id, organization_id, source, key_id, algorithm, key_material, not_before)
+         VALUES ($1,$2,$3,$4,'ED25519',$5, now())`,
+        [
+          newId('signalKey'),
+          orgId,
+          source,
+          keyId,
+          publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+        ],
+      );
+    }
+
     await client.query('COMMIT');
 
     return {
@@ -297,6 +347,7 @@ export async function seed(connectionString = adminUrl): Promise<SeedResult> {
       agents,
       tokens,
       policy_version_id: policyVersionId,
+      signal_source_keys: signalSourceKeys,
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -317,6 +368,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         .map(([k, v]) => `${k}=${v}`)
         .join(', ')}`,
       `  policy:    ${result.policy_version_id} (ACTIVE)`,
+      `  signals:   ${Object.entries(result.signal_source_keys)
+        .map(([source, key]) => `${source} (${key.key_id}, ED25519)`)
+        .join(', ')}`,
       `  tokens written to ${outputPath} (git-ignored; development only)`,
       '',
     ].join('\n'),

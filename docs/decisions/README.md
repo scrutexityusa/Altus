@@ -23,3 +23,4 @@ would make us revisit it.
 | [0015](0015-exact-intent-binding.md)           | An ALLOW records the exact operation it authorises, and its binding  | Accepted |
 | [0016](0016-execution-enforcement-boundary.md) | Scrutexity performs the operation; the boundary is the only path out | Accepted |
 | [0017](0017-security-time-authority.md)        | The database is the single authority for every validity decision     | Accepted |
+| [0018](0018-signal-key-custody.md)             | Signal sources must enrol an Ed25519 key; HMAC is refused by default | Accepted |

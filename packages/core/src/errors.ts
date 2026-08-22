@@ -24,6 +24,16 @@ export const ERROR_CODES = [
   // Signal plane
   'SIGNAL_SIGNATURE_INVALID',
   'SIGNAL_KEY_UNKNOWN',
+  /**
+   * The signal's source has no signing key registered in this tenant.
+   *
+   * Distinct from SIGNAL_KEY_UNKNOWN, which means "this source is enrolled and
+   * that key id is not one of its keys". This means the source is not known to
+   * the tenant at all, so nothing it asserts is attributable to anyone. The
+   * two are separated because they call for different operator actions --
+   * enrol the source, versus investigate a key id that should not exist.
+   */
+  'SIGNAL_SOURCE_NOT_ENROLLED',
   // Control-plane availability
   'POLICY_UNAVAILABLE',
   'SIGNAL_UNAVAILABLE',
@@ -77,6 +87,7 @@ const STATUS: Record<ErrorCode, number> = {
   CONTEXT_CHANGED: 409,
   SIGNAL_SIGNATURE_INVALID: 403,
   SIGNAL_KEY_UNKNOWN: 403,
+  SIGNAL_SOURCE_NOT_ENROLLED: 403,
   POLICY_UNAVAILABLE: 503,
   SIGNAL_UNAVAILABLE: 503,
   ENFORCEMENT_UNAVAILABLE: 503,
@@ -199,6 +210,8 @@ const GENERIC_MESSAGES: Record<ErrorCode, string> = {
     'A previous execution against this authorization has not been resolved. It must be reconciled against the provider before anything further is attempted.',
   SIGNAL_SIGNATURE_INVALID: 'The signal signature did not verify.',
   SIGNAL_KEY_UNKNOWN: 'No active signing key matches this signal.',
+  SIGNAL_SOURCE_NOT_ENROLLED:
+    'This signal source is not enrolled. A source must register a signing key before its signals are accepted.',
   POLICY_UNAVAILABLE: 'The policy could not be evaluated.',
   SIGNAL_UNAVAILABLE: 'Required risk signals could not be read.',
   ENFORCEMENT_UNAVAILABLE: 'The enforcement plane is unavailable.',

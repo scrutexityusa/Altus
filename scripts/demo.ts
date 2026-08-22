@@ -13,6 +13,7 @@
 import { execSync } from 'node:child_process';
 import { buildApp } from '../services/api/src/app.js';
 import { seed, type SeedResult } from './seed.js';
+import { signedSignal } from './signal-source.js';
 
 const ADMIN_URL =
   process.env['DATABASE_ADMIN_URL'] ??
@@ -299,14 +300,23 @@ async function main(): Promise<void> {
     }
 
     scene('A fraud signal arrives');
-    const signal = await call('POST', '/v1/signals', t['fraud_engine']!, {
-      subject: { type: 'agent', id: fixtures.agents['treasury'] },
-      signal_type: 'fraud_risk',
-      value: '0.97',
-      confidence: '0.91',
-      source: 'external_fraud_engine',
-      ttl_seconds: 600,
-    });
+    // Signed by the source, as every signal must be. The fraud engine enrolled
+    // an Ed25519 public key when the tenant was set up; Scrutexity has never
+    // held the private half, and a signal it cannot attribute to an enrolled
+    // source does not influence authority at all.
+    const signal = await call(
+      'POST',
+      '/v1/signals',
+      t['fraud_engine']!,
+      signedSignal(fixtures, {
+        subject: { type: 'agent', id: fixtures.agents['treasury']! },
+        signal_type: 'fraud_risk',
+        value: '0.97',
+        confidence: '0.91',
+        source: 'external_fraud_engine',
+        ttl_seconds: 600,
+      }),
+    );
     expect(signal.status === 201, `signal ingestion failed: ${JSON.stringify(signal.body)}`);
     step(
       `fraud_risk = ${red('0.97')} for treasury-agent, valid until ${signal.body.signal.expires_at}`,

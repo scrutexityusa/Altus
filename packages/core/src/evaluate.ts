@@ -283,6 +283,30 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
   };
   const policyOutcome = evaluatePolicy(document, policyInput);
 
+  /**
+   * What policy would have said with no risk information at all.
+   *
+   * Used for exactly one thing: deciding whether an approver was named
+   * *independently of any signal*. A signal may add an approval requirement to
+   * an action policy already permits -- that is authority decay, and it makes
+   * the outcome stricter. It may not be the reason an approver exists at all,
+   * because that turns a refusal into a request a human can grant.
+   *
+   * Found by the randomised containment property in
+   * packages/core/test/invariants.test.ts, which produced a lease whose
+   * currency did not cover the request (a hard DENY: policy named nobody who
+   * could supply the difference) and then raised the fraud signal above the
+   * escalation threshold. The high-risk rule named a treasurer, the shortfall
+   * became something a treasurer could approve, and asserting *more* risk had
+   * produced a *more* permissive outcome. A compromised fraud engine could
+   * summon an approval request for any action the agent's authority did not
+   * cover, and use the approver as a confused deputy.
+   */
+  const baselineOutcome =
+    policyInput.signals.length === 0
+      ? policyOutcome
+      : evaluatePolicy(document, { ...policyInput, signals: [] });
+
   const signalFailover = document.failure_modes.signal_unavailable;
   const enforcementFailover = document.failure_modes.enforcement_unavailable;
 
@@ -375,7 +399,21 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
     reasonCode = envelopeReasonCode(findings, selected);
     approvalRequirement = null;
   } else if (!selected.autonomous) {
-    if (approvalRequirement) {
+    // Who may supply the difference, and for what.
+    //
+    // DECAY: the base grant covered this attempt and a signal shrank it. The
+    // human is being asked to restore authority the agent genuinely held, so
+    // an approver named by that same signal is legitimate -- this is authority
+    // decay working as designed, and it is why the signal plane exists.
+    //
+    // Otherwise the shortfall is the agent's own authority falling short, and
+    // only an approver policy would have named *without any signal* can supply
+    // it. A signal must never be the thing that makes a refusal approvable:
+    // that would let a compromised source summon an approval request for an
+    // action the agent's authority never covered. See baselineOutcome above.
+    const rescuable =
+      autonomy.blocked_by?.kind === 'DECAY' || baselineOutcome.approval_requirement !== null;
+    if (approvalRequirement && rescuable) {
       decision = strictest(decision, 'ESCALATE');
       reasonCode =
         autonomy.blocked_by?.kind === 'DECAY'
@@ -388,6 +426,7 @@ export function evaluateAuthorization(snapshot: EvaluationSnapshot): Authorizati
       // named who could supply the difference. Fail closed.
       decision = 'DENY';
       reasonCode = 'CONSTRAINT_VIOLATION';
+      approvalRequirement = null;
     }
   }
 

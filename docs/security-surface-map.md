@@ -111,16 +111,17 @@ tenant's own register — an agent cannot declare its counterparty known.
 
 ## 6. Risk signals — `POST /v1/signals`
 
-|                      |                                                                                                                                                                                                                                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Trust boundary**   | External signal source → authority reduction.                                                                                                                                                                                                                                               |
-| **Inputs**           | subject, type, value, confidence, source, TTL, `event_id`, signature, key id                                                                                                                                                                                                                |
-| **Authority impact** | **Subtracts only.** `restrictGrant` cannot widen; a currency-incomparable ceiling leaves the existing one standing.                                                                                                                                                                         |
-| **Persistent state** | `risk_signals`, `security_events` on rejection.                                                                                                                                                                                                                                             |
-| **Failure mode**     | Bad signature → 403 + security event. Replayed `event_id` → 409 + security event.                                                                                                                                                                                                           |
-| **Invariants**       | INV-008, INV-018 (replay).                                                                                                                                                                                                                                                                  |
-| **Tests**            | `nextphase.test.ts` signal auth + rotation, `invariants.test.ts` property test that decay only narrows.                                                                                                                                                                                     |
-| **Gaps**             | **G-5.** HMAC shared secrets are stored in plaintext in `signal_signing_keys`. Flagged in the migration itself as requiring resolution before real data. **G-6.** No check that a source is _authorized for that signal type_ — any valid key can assert any signal type about any subject. |
+|                      |                                                                                                                                                                                                                                                                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Trust boundary**   | External signal source → authority reduction.                                                                                                                                                                                                                                                                                               |
+| **Inputs**           | subject, type, value, confidence, source, TTL, `event_id`, signature, key id                                                                                                                                                                                                                                                                |
+| **Authority impact** | **Subtracts only.** `restrictGrant` cannot widen; a currency-incomparable ceiling leaves the existing one standing.                                                                                                                                                                                                                         |
+| **Persistent state** | `risk_signals`, `security_events` on rejection.                                                                                                                                                                                                                                                                                             |
+| **Authentication**   | **Enrolment is mandatory.** Ed25519 only unless a deployment explicitly opts into legacy HMAC, which production cannot. The algorithm rule is enforced at verification, not only at registration, so a key predating the check or restored from a backup does not authenticate. ADR-0018.                                                   |
+| **Failure mode**     | Unenrolled source → 403 `SIGNAL_SOURCE_NOT_ENROLLED`. Bad signature → 403. Refused algorithm → 403 `ALGORITHM_NOT_PERMITTED`. Replayed `event_id` → 409. Each writes a durable security event on a transaction that survives the rejection.                                                                                                 |
+| **Invariants**       | INV-008, INV-018 (replay).                                                                                                                                                                                                                                                                                                                  |
+| **Tests**            | `signals.test.ts` (25) — enrolment, legacy-HMAC migration case with a positive control, containment under a compromised issuer, key-material non-disclosure, production boot refusals, permissive posture. `nextphase.test.ts` key lifecycle on Ed25519. `invariants.test.ts` randomised containment over 1500 signal sets. Adversarial A7. |
+| **Gaps**             | **G-6.** No check that a source is _authorized for that signal type_ — any enrolled key can assert any signal type about any subject.                                                                                                                                                                                                       |
 
 ## 7. Execution enforcement — `POST /v1/execute`
 
@@ -196,22 +197,23 @@ mutable "latest" key. Decisions pin `policy_version_id` **and** `policy_hash`.
 
 ## Gaps, ranked
 
-| #        | Gap                                                              | Severity | Validated | Fixed        | Regression-tested | Operationally verified  |
-| -------- | ---------------------------------------------------------------- | -------- | --------- | ------------ | ----------------- | ----------------------- |
-| G-2      | `leases:write` could issue unbounded authority                   | Critical | ✅        | ✅           | ✅ 9 tests        | —                       |
-| G-4      | No runtime invariant assertion before ALLOW                      | High     | ✅        | ✅           | ✅ 16 + 5 tests   | —                       |
-| G-14     | `read` scope never enforced; reads not subject-scoped            | High     | ✅        | ✅           | ✅ 15 tests       | —                       |
-| G-3      | Containment checked at creation only                             | Medium   | ✅        | ✅ (via G-4) | ✅                | —                       |
-| **G-12** | **Expiry judged on the API clock, rows written on the DB clock** | **High** | ✅        | ✅           | ✅ 20 tests       | **NOT YET — see below** |
-| G-5      | HMAC signal secrets stored in plaintext                          | High     | ✅        | —            | —                 | —                       |
-| G-7      | Reconciliation surfaces UNKNOWN but cannot resolve it            | Medium   | ✅        | —            | —                 | —                       |
-| G-6      | Signal source not bound to signal type                           | Medium   | ✅        | —            | —                 | —                       |
-| G-15     | No rate limiting anywhere                                        | Medium   | ✅        | —            | —                 | —                       |
-| G-11     | No external evidence anchor                                      | Medium   | ✅        | —            | —                 | —                       |
-| G-1      | Bearer token only; no workload-bound identity                    | Medium   | ✅        | —            | —                 | —                       |
-| G-8      | No `HUMAN_REVIEW_REQUIRED` state                                 | Low      | ✅        | —            | —                 | —                       |
-| G-13     | No offline-verifiable evidence export                            | Low      | ✅        | —            | —                 | —                       |
-| G-9      | Unenforced self-report path still exists                         | Low      | ✅        | n/a          | n/a               | —                       |
+| #        | Gap                                                                 | Severity | Validated | Fixed        | Regression-tested     | Operationally verified  |
+| -------- | ------------------------------------------------------------------- | -------- | --------- | ------------ | --------------------- | ----------------------- |
+| G-2      | `leases:write` could issue unbounded authority                      | Critical | ✅        | ✅           | ✅ 9 tests            | —                       |
+| G-4      | No runtime invariant assertion before ALLOW                         | High     | ✅        | ✅           | ✅ 16 + 5 tests       | —                       |
+| G-14     | `read` scope never enforced; reads not subject-scoped               | High     | ✅        | ✅           | ✅ 15 tests           | —                       |
+| G-3      | Containment checked at creation only                                | Medium   | ✅        | ✅ (via G-4) | ✅                    | —                       |
+| **G-12** | **Expiry judged on the API clock, rows written on the DB clock**    | **High** | ✅        | ✅           | ✅ 20 tests           | **NOT YET — see below** |
+| G-5      | HMAC signal secrets stored in plaintext; unenrolled sources trusted | High     | ✅        | ✅           | ✅ 25 + 10 tests, A7  | **NOT YET — see below** |
+| G-19     | A signal could make an uncovered request approvable                 | High     | ✅        | ✅           | ✅ property + 3 tests | —                       |
+| G-7      | Reconciliation surfaces UNKNOWN but cannot resolve it               | Medium   | ✅        | —            | —                     | —                       |
+| G-6      | Signal source not bound to signal type                              | Medium   | ✅        | —            | —                     | —                       |
+| G-15     | No rate limiting anywhere                                           | Medium   | ✅        | —            | —                     | —                       |
+| G-11     | No external evidence anchor                                         | Medium   | ✅        | —            | —                     | —                       |
+| G-1      | Bearer token only; no workload-bound identity                       | Medium   | ✅        | —            | —                     | —                       |
+| G-8      | No `HUMAN_REVIEW_REQUIRED` state                                    | Low      | ✅        | —            | —                     | —                       |
+| G-13     | No offline-verifiable evidence export                               | Low      | ✅        | —            | —                     | —                       |
+| G-9      | Unenforced self-report path still exists                            | Low      | ✅        | n/a          | n/a                   | —                       |
 
 ### G-12, and what "operationally verified" would require
 
@@ -229,6 +231,65 @@ What is **not** established, and cannot be from here:
 Those are checks a design partner's infrastructure has to answer. Recording
 them as open is the difference between "we fixed it" and "we fixed the part we
 control".
+
+### G-5, expanded — **closed**, with one thing still not established
+
+Three separate defects sat under one gap number, and only the third was the one
+the gap was originally written about.
+
+1. **A source with no registered key was trusted.** `verifySignal` reported
+   `no_key_configured` and the caller treated it as non-fatal, so anyone holding
+   `signals:write` could assert any signal about any subject from any source
+   name they invented. A signal reduces authority, so this was a denial of
+   service against a legitimate agent delivered through the control plane.
+
+2. **HMAC was the path everything actually used.** Every integration test, and
+   the only end-to-end exercise of the key lifecycle, ran on HMAC. The suite was
+   proving the algorithm the product says it prefers not to use, and would not
+   have noticed if the Ed25519 path had broken.
+
+3. **The algorithm rule was enforced at registration.** Production refused to
+   _register_ an HMAC key. A row written before that check existed, or restored
+   from a backup taken before it, still authenticated signals.
+
+All three are closed: enrolment is mandatory, `SIGNAL_LEGACY_HMAC` defaults to
+`refused` in development as well as production, and the permitted-algorithm
+check runs where every signal passes. ADR-0018 has the reasoning and the
+rotation runbook.
+
+**Not established, and not establishable from here:** production requires
+`SECRET_PROVIDER=kms`, and `KmsSecretProvider` is a shape with no key manager
+behind it. It throws on every read, so a deployment that selects it without
+wiring one fails at boot rather than falling back to local custody silently.
+That is the correct failure, but it means **no deployment of this code has ever
+started in a production posture.** Wiring a specific key manager is a
+constructor argument and an SDK dependency, and it happens when a design
+partner's infrastructure says which one.
+
+### G-19 — a signal could make an uncovered request approvable — **closed**
+
+Found by the randomised containment property written for G-5, not by review.
+
+A lease denominated in EUR does not cover a USD wire. Policy named no approver
+for the ordinary case, so the request was a hard DENY: nobody could supply the
+difference. Raising the fraud score above the escalation threshold matched a
+rule that _does_ name a treasurer — and the same authority shortfall became
+something a treasurer could approve.
+
+Asserting **more** risk produced a **more** permissive outcome. A compromised
+signal source could summon an approval request for any action the agent's
+authority never covered, and use the approver as a confused deputy.
+
+The fix separates two shortfalls. When the base grant covered the attempt and a
+signal shrank it, the human is restoring authority the agent genuinely held, and
+an approver named by that signal is legitimate — that is authority decay working
+as designed. When the agent's own authority falls short, only an approver policy
+would have named _without any signal_ can supply it.
+
+This is the second defect found by a mechanism built to look for a different
+one, after G-16. The property is now asserted over 1500 randomised signal sets
+in `packages/core/test/invariants.test.ts`, and the specific case is pinned as a
+named regression with a positive control proving decay still escalates.
 
 ### G-14, expanded — **closed**
 
@@ -309,6 +370,11 @@ Section 37 says comments are not controls. Two current claims fail that test:
    autonomous and the post-approval path; closed G-3 with it.
 3. ~~**G-2**~~ — **done.** Ceilings live in the policy, so changing who may
    grant what needs a reviewed, hash-checked, dual-control policy change.
-4. **G-12** — database time for every expiry comparison, with a skew test.
-5. **G-5** — Ed25519-only in production; secret provider abstraction.
-6. G-15, G-6, G-7, G-1, G-11, G-13 in that order.
+4. ~~**G-12**~~ — **done.** Database time for every expiry comparison, with a
+   skew test in both directions.
+5. ~~**G-16**~~ — **done.** The execution claim commits before the provider is
+   called; found by asking how long the authorization transaction was open.
+6. ~~**G-5**~~ — **done.** Mandatory enrolment, Ed25519 by default everywhere,
+   the algorithm rule enforced at verification, and a secret provider that
+   production cannot satisfy with local custody. Closing it surfaced **G-19**.
+7. G-15, G-6, G-7, G-1, G-11, G-13 in that order.
