@@ -78,6 +78,14 @@ web: ## Run the dashboard
 demo: build ## Run the full treasury demo from a clean database
 	pnpm exec tsx scripts/demo.ts
 
+.PHONY: adversarial
+adversarial: build ## Run the adversarial conformance suite (11 security invariants)
+	# Not an alias for a subset of the unit tests. Each scenario mounts a real
+	# attack through the public API against a real database, and reports
+	# whether the invariant held, whether the provider was contacted, and what
+	# evidence was produced. Exits non-zero if any invariant fails.
+	pnpm exec tsx scripts/adversarial.ts
+
 .PHONY: test
 test: ## Run every test
 	pnpm exec vitest run
@@ -111,4 +119,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test build demo ## Everything CI runs
+ci: install lint test build demo adversarial ## Everything CI runs

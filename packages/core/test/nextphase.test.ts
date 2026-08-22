@@ -625,16 +625,41 @@ describe('signal authentication', () => {
   });
 
   it('does not let one source sign for another', () => {
+    // This used to expect `no_key_configured`, which is the *non-fatal*
+    // reason: a source that has not enrolled is allowed through as
+    // unauthenticated. So a signal bearing another source's perfectly valid
+    // signature was being accepted, because the receiving source happened to
+    // have no keys of its own.
+    //
+    // Presenting a signature is a claim of authenticity, and a claim that
+    // cannot be checked fails rather than passes. `unknown_key_id` is fatal.
     const otherSource = { ...envelope, source: 'a_different_engine' };
-    expect(
-      verifySignal(
-        otherSource,
-        signSignalHmac(otherSource, hmacKey.key_material),
-        'k1',
-        [hmacKey],
-        T0,
-      ),
-    ).toMatchObject({ reason: 'no_key_configured' });
+    const verification = verifySignal(
+      otherSource,
+      signSignalHmac(otherSource, hmacKey.key_material),
+      'k1',
+      [hmacKey],
+      T0,
+    );
+    expect(verification.verified).toBe(false);
+    expect(verification).toMatchObject({ reason: 'unknown_key_id' });
+  });
+
+  it('rejects a presented signature even when the source has no keys at all', () => {
+    // The adversarial suite's A7 case, pinned here at the unit level: an
+    // unenrolled source plus a forged signature must not be a 201.
+    const verification = verifySignal(envelope, 'not-a-real-signature', 'no-such-key', [], T0);
+    expect(verification.verified).toBe(false);
+    expect(verification).toMatchObject({ reason: 'unknown_key_id' });
+  });
+
+  it('still admits an unenrolled source that presents no signature', () => {
+    // The unauthenticated path is a deliberate posture for sources that have
+    // not yet enrolled, and it is distinguishable in evidence. Tightening the
+    // default is G-5's job; what must not happen is a *presented* signature
+    // being ignored.
+    const verification = verifySignal(envelope, null, null, [], T0);
+    expect(verification).toMatchObject({ reason: 'no_key_configured' });
   });
 });
 

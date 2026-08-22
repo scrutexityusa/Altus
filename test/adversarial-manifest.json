@@ -1,0 +1,187 @@
+{
+  "$comment": "The adversarial conformance registry. Each entry is a system-level security invariant, not a unit test. `scripts/adversarial.ts` runs these end to end against a real database and a recording provider, and reports whether each invariant holds. Adding a scenario here without implementing it fails the run: the manifest is the contract, not a wish list.",
+  "version": 1,
+  "scenarios": [
+    {
+      "scenario_id": "A1",
+      "title": "Temporal expiry",
+      "threat": "An agent uses authority after it has lapsed, or a node's local clock decides when it lapses.",
+      "precondition": "A lease with a known expires_at, and an API process whose wall clock disagrees with the database.",
+      "attack": "Execute at the exact expiry instant, one millisecond either side of it, and with the API clock skewed an hour in each direction.",
+      "expected_invariant": "ExpiredAuthority => NoExecution. The boundary is inclusive: at expires_at the authority is already gone. The API node's clock changes nothing.",
+      "cases": [
+        "boundary -1ms valid",
+        "boundary exact expired",
+        "boundary +1ms expired",
+        "api clock ahead",
+        "api clock behind"
+      ],
+      "test_target": "packages/core/test/temporal.test.ts, services/api/test/temporal.test.ts",
+      "invariant_ids": ["INV-007"],
+      "gap": "G-12"
+    },
+    {
+      "scenario_id": "A2",
+      "title": "Revocation",
+      "threat": "Authority revoked at the root continues to authorise through a descendant, or a grant issued before the revocation slips past it.",
+      "precondition": "A delegated chain with an already-issued, not-yet-executed grant.",
+      "attack": "Revoke the parent lease after the ALLOW, then execute against the outstanding grant.",
+      "expected_invariant": "RevokedAuthority => NoExecution, checked live at execution time and walking the whole ancestry. An outstanding grant confers nothing once the authority behind it is gone.",
+      "cases": ["revoke the acting lease", "revoke an ancestor", "grant issued before revocation"],
+      "test_target": "services/api/test/enforcement.test.ts",
+      "invariant_ids": ["INV-005"],
+      "gap": null
+    },
+    {
+      "scenario_id": "A3",
+      "title": "Authority drift",
+      "threat": "Persisted authority is widened by a bug, a migration, or direct database access, bypassing the creation APIs entirely.",
+      "precondition": "A lawfully created delegated chain.",
+      "attack": "Mutate the stored child grant so it claims an action its parent never held, then evaluate.",
+      "expected_invariant": "Runtime invariant verification fails, the decision is DENIED with AUTHORITY_INVARIANT_VIOLATION, and a durable security event is emitted. A violation is never reported as an ordinary policy denial.",
+      "cases": [
+        "child gains an action",
+        "child widens resources",
+        "security event durable",
+        "lawful chain unaffected"
+      ],
+      "test_target": "services/api/test/security.test.ts, packages/core/test/authority-invariants.test.ts",
+      "invariant_ids": ["INV-001", "INV-002", "INV-003"],
+      "gap": "G-4"
+    },
+    {
+      "scenario_id": "A4",
+      "title": "Privilege synthesis",
+      "threat": "A principal holding two narrow roles combines them into authority neither role grants.",
+      "precondition": "Two issuance ceilings, neither of which alone contains the requested authority.",
+      "attack": "Request a lease whose grant is covered only by the union of the two ceilings.",
+      "expected_invariant": "RequestedLease must fit wholly inside ONE ceiling. Ceilings are never unioned. A positive control proves the refusal is not simply 'multi-role requests are denied'.",
+      "cases": [
+        "union of two roles refused",
+        "single covering ceiling admitted",
+        "amount above ceiling",
+        "action outside ceiling"
+      ],
+      "test_target": "services/api/test/security.test.ts",
+      "invariant_ids": ["INV-001"],
+      "gap": "G-2"
+    },
+    {
+      "scenario_id": "A5",
+      "title": "Isolation and enumeration",
+      "threat": "One subject or tenant reads another's policy, lease, decision, trace or receipt — or learns whether it exists.",
+      "precondition": "Two agents in one tenant, and a second tenant.",
+      "attack": "Read another subject's decision, trace, receipt and lease; read the policy document as an agent; read across tenants.",
+      "expected_invariant": "404, never 403. An unauthorised caller cannot distinguish 'exists' from 'does not exist' by status or response shape, so the endpoint is not an oracle. Agents cannot read the control plane at all.",
+      "cases": [
+        "cross-subject decision",
+        "cross-subject trace",
+        "cross-subject receipt",
+        "cross-tenant",
+        "agent reads policy",
+        "agent reads security events"
+      ],
+      "test_target": "services/api/test/security.test.ts",
+      "invariant_ids": ["INV-009"],
+      "gap": "G-14"
+    },
+    {
+      "scenario_id": "A6",
+      "title": "Clock disagreement",
+      "threat": "Local wall-clock manipulation changes a security answer.",
+      "precondition": "An API process whose clock can be moved independently of the database.",
+      "attack": "Evaluate and execute with the API clock an hour behind, then an hour ahead, against the same durable state.",
+      "expected_invariant": "Identical authorization result in both directions. Every validity decision reads one authoritative instant per decision, sourced from the database.",
+      "cases": [
+        "skew behind",
+        "skew ahead",
+        "reported state matches decision",
+        "one instant per decision"
+      ],
+      "test_target": "services/api/test/temporal.test.ts",
+      "invariant_ids": ["INV-007"],
+      "gap": "G-12"
+    },
+    {
+      "scenario_id": "A7",
+      "title": "Signal compromise containment",
+      "threat": "A forged signal, or a fully compromised but legitimately trusted signal issuer, manufactures authority.",
+      "precondition": "A registered signal source, and a baseline decision with a known outcome.",
+      "attack": "Submit a forged signature; then, holding a valid key, submit signals crafted to turn a DENY into an ALLOW and to raise a ceiling.",
+      "expected_invariant": "Authority(after signal) is a subset of Authority(before signal). A signal may subtract authority and may never manufacture it. The cryptographic layer and the containment layer fail independently: even a mathematically valid signature from a trusted issuer cannot expand authority.",
+      "cases": [
+        "forged signature rejected",
+        "replayed event rejected",
+        "valid signal cannot flip DENY to ALLOW",
+        "valid signal cannot raise a ceiling",
+        "legacy HMAC rejected"
+      ],
+      "test_target": "services/api/test/nextphase.test.ts, services/api/test/signals.test.ts",
+      "invariant_ids": ["INV-008"],
+      "gap": "G-5"
+    },
+    {
+      "scenario_id": "A8",
+      "title": "Replay and concurrency",
+      "threat": "One grant produces more than one external side effect.",
+      "precondition": "A single ALLOW decision.",
+      "attack": "Fire N concurrent executions against it, then retry sequentially after settlement.",
+      "expected_invariant": "Exactly one execution claim, exactly one execution attempt, at most one provider side effect. Losers may legitimately observe any of EXECUTING, UNKNOWN, EXECUTED, FAILED or RECONCILED depending on scheduling; the durable invariant is asserted, never the scheduler-dependent response.",
+      "cases": [
+        "ten concurrent attempts",
+        "one claim row",
+        "one attempt row",
+        "one provider call",
+        "sequential retry replays the outcome"
+      ],
+      "test_target": "services/api/test/enforcement.test.ts",
+      "invariant_ids": ["INV-006"],
+      "gap": null
+    },
+    {
+      "scenario_id": "A9",
+      "title": "Crash before the provider",
+      "threat": "A crash between committing the claim and calling the provider leaves authority spendable again.",
+      "precondition": "A committed EXECUTING claim with the grant already spent.",
+      "attack": "Retry the execution as a restarted process would.",
+      "expected_invariant": "409 EXECUTION_UNRESOLVED, no provider call, the grant stays spent, and the original idempotency key is preserved for reconciliation.",
+      "cases": ["retry refused", "provider not contacted", "grant still spent", "key preserved"],
+      "test_target": "services/api/test/enforcement.test.ts",
+      "invariant_ids": ["INV-006", "INV-010"],
+      "gap": "G-16"
+    },
+    {
+      "scenario_id": "A10",
+      "title": "Provider success, settlement crash",
+      "threat": "The money moved and the record of it did not. A retry pays twice.",
+      "precondition": "A committed claim, a provider that accepted the request, and settlement that never ran.",
+      "attack": "Retry the execution.",
+      "expected_invariant": "409 EXECUTION_UNRESOLVED — never REPLAY_DETECTED, which would tell the caller the work is finished. The provider is not called again, the grant stays spent, and the claim is surfaced for reconciliation under its original key. verifyExecution is the only safe external operation against this state.",
+      "cases": [
+        "retry refused as unresolved",
+        "provider not contacted",
+        "grant still spent",
+        "surfaced for reconciliation",
+        "settled claim replays its outcome"
+      ],
+      "test_target": "services/api/test/enforcement.test.ts",
+      "invariant_ids": ["INV-006", "INV-010"],
+      "gap": "G-16"
+    },
+    {
+      "scenario_id": "A11",
+      "title": "Transaction fault injection",
+      "threat": "A code path reaches the provider while the claim and the authority consumption are still uncommitted — the defect G-16 existed to fix.",
+      "precondition": "A provider that can observe the database from outside the request's transaction.",
+      "attack": "At the moment execute() is called, read the claim and the lease from an independent connection.",
+      "expected_invariant": "No code path may reach ExecutionProvider.execute() unless the execution claim and the authority consumption are already externally observable as committed state. Asserted from inside the provider, on a connection that cannot see uncommitted work.",
+      "cases": [
+        "claim visible externally at call time",
+        "grant consumption visible externally at call time"
+      ],
+      "test_target": "scripts/adversarial.ts",
+      "invariant_ids": ["INV-006", "INV-010"],
+      "gap": "G-16"
+    }
+  ]
+}

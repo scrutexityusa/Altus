@@ -125,6 +125,19 @@ export function verifySignal(
   now: Date,
 ): SignalVerification {
   const candidates = keys.filter((key) => key.source === envelope.source);
+
+  // A presented signature is always verified, even when the source has no
+  // registered key. Checking `no_key_configured` first -- as this did -- meant
+  // a caller could attach any bytes at all and have them ignored, because that
+  // reason is treated as non-fatal for sources that have not yet enrolled.
+  //
+  // Presenting a signature is a claim of authenticity. A claim that cannot be
+  // checked is not a claim that passes; it is one that fails. Found by the
+  // adversarial suite (A7), which submitted a forged signature against an
+  // unenrolled source and got a 201.
+  if (signature && candidates.length === 0)
+    return { verified: false, reason: 'unknown_key_id', key_id: keyId };
+
   if (candidates.length === 0)
     return { verified: false, reason: 'no_key_configured', key_id: null };
   if (!signature) return { verified: false, reason: 'signature_missing', key_id: keyId };
