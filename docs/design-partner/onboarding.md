@@ -96,7 +96,7 @@ yet. That takes a few seconds and happens once.
 
 ```bash
 ALTUS_BOOTSTRAP_DATABASE_URL="$DATABASE_ADMIN_URL" \
-  pnpm altus bootstrap \
+  pnpm --silent altus bootstrap \
     --org-name    "Example Treasury" \
     --admin-name  "Jane Smith" \
     --admin-email "jane@example.com" \
@@ -109,6 +109,11 @@ This creates your organization, your first administrator, and one credential.
 It is the **only** step that uses the database owner connection, it runs once,
 and it refuses to run again — the installation is marked in a table whose
 primary key permits exactly one row.
+
+`--silent` is not decoration. Without it `pnpm` prints its own two-line run
+banner to **stdout**, ahead of the JSON, and `bootstrap.json` becomes a file
+`jq` refuses to parse. If you see `parse error: Invalid numeric literal`, that
+is what happened; re-run with `--silent`.
 
 Capture both values it produced. **The token is printed once and cannot be
 recovered**, which is why this writes it to a file rather than asking you to
@@ -170,7 +175,8 @@ Then issue yourself a working credential:
 export ADMIN=$(curl -sS -X POST $ALTUS/v1/credentials \
   -H "authorization: Bearer $BOOTSTRAP" -H 'content-type: application/json' \
   -d "{\"principal_type\":\"user\",\"principal_id\":\"$ADMIN_USER_ID\",
-       \"scopes\":[\"read\",\"audit:read\",\"admin:write\",\"leases:write\",\"policies:write\"]}" \
+       \"scopes\":[\"read\",\"audit:read\",\"admin:write\",\"leases:write\",\"policies:write\"],
+       \"expires_in_seconds\":7776000}" \
   | jq -r .token)
 
 rm bootstrap.json
@@ -184,7 +190,14 @@ by a named principal, and appears in `GET /v1/credentials` with a prefix,
 scopes, and a last-used time. Keeping the ceremony token in daily use would
 leave one credential in your estate that the estate cannot account for.
 
-Revoking it is the last step of onboarding — see the end of this page.
+`expires_in_seconds` is required, and 7776000 is the maximum: ninety days.
+There is no value that means "never" — a credential with no expiry is not
+representable, at the schema, at the issuing function, and at the column. Put
+the rotation date in a calendar now; `docs/credentials-rotation.md` has the
+procedure, which takes about a minute and needs no downtime.
+
+The bootstrap token itself lives seven days, whatever you do. Revoking it is
+the last step of onboarding — see the end of this page.
 
 ---
 
@@ -202,7 +215,8 @@ create_human() {   # email  display-name  role  scopes-json  →  prints a token
     | jq -er .user.id) || { echo "creating $1 failed" >&2; return 1; }
   curl -sS -X POST $ALTUS/v1/credentials \
     -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
-    -d "{\"principal_type\":\"user\",\"principal_id\":\"$uid\",\"scopes\":$4}" \
+    -d "{\"principal_type\":\"user\",\"principal_id\":\"$uid\",\"scopes\":$4,
+         \"expires_in_seconds\":7776000}" \
     | jq -er .token
 }
 
@@ -314,7 +328,8 @@ curl -sS -X POST $ALTUS/v1/agents \
 export AGENT=$(curl -sS -X POST $ALTUS/v1/credentials \
   -H "authorization: Bearer $ADMIN" -H 'content-type: application/json' \
   -d '{"principal_type":"agent","principal_id":"payments-agent",
-       "scopes":["read","authorization:evaluate"]}' | jq -er .token)
+       "scopes":["read","authorization:evaluate"],
+       "expires_in_seconds":7776000}' | jq -er .token)
 ```
 
 `owner_user_id` is the accountable human — here, yourself. Every agent has one;

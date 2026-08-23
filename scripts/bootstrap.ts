@@ -57,6 +57,22 @@ import { newId } from '@scrutexity/core';
 const BOOTSTRAP_URL_VAR = 'ALTUS_BOOTSTRAP_DATABASE_URL';
 
 /**
+ * Seven days.
+ *
+ * The bootstrap credential exists to reach the API once and provision the
+ * first real one; the onboarding guide spends it in under a minute. A week is
+ * chosen against the failure mode rather than the happy path: an installation
+ * that is bootstrapped on a Friday and forgotten is not a live administrative
+ * credential the following month.
+ *
+ * It is deliberately not shorter. Re-running the ceremony is refused by the
+ * `installation` primary key, so an operator whose window lapsed needs the
+ * owner connection again -- see docs/credentials-rotation.md. Making that
+ * recovery routine would be worse than making the window survive a weekend.
+ */
+const BOOTSTRAP_CREDENTIAL_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/**
  * What the first credential can do, and nothing more.
  *
  * Enough to take over from the ceremony -- create the humans, issue their
@@ -88,7 +104,10 @@ REQUIRED
 
 OPTIONAL
   --org-slug    <slug>    URL-safe identifier. Derived from --org-name if absent
-  --json                  Machine-readable output on stdout
+  --json                  Machine-readable output on stdout.
+                          Run this as: pnpm --silent altus bootstrap. Without
+                          --silent, pnpm prints its own run banner to stdout
+                          ahead of the JSON and the capture will not parse.
   --help                  This text
 
 ENVIRONMENT
@@ -263,9 +282,20 @@ async function runCeremony(
     const { token, prefix, hash } = issueToken();
     await client.query(
       `INSERT INTO scrutexity.api_credentials
-         (id, organization_id, principal_type, principal_id, token_prefix, token_hash, scopes)
-       VALUES ($1, $2, 'user', $3, $4, $5, $6)`,
-      [credentialId, orgId, userId, prefix, hash, BOOTSTRAP_SCOPES],
+         (id, organization_id, principal_type, principal_id, token_prefix, token_hash,
+          scopes, created_at, expires_at)
+       VALUES ($1, $2, 'user', $3, $4, $5, $6,
+               transaction_timestamp(),
+               transaction_timestamp() + make_interval(secs => $7))`,
+      [
+        credentialId,
+        orgId,
+        userId,
+        prefix,
+        hash,
+        BOOTSTRAP_SCOPES,
+        BOOTSTRAP_CREDENTIAL_TTL_SECONDS,
+      ],
     );
 
     // The gate, and deliberately the LAST statement rather than the first.

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import pg from 'pg';
 import { bootstrap } from '../../../scripts/bootstrap.js';
 import { buildApp, type App } from '../src/app.js';
 import { ADMIN_URL, APP_URL, resetDatabase } from './harness.js';
@@ -38,6 +39,25 @@ const call = async (method: string, url: string, token: string, body?: unknown) 
   });
   return { status: response.statusCode, body: response.body ? JSON.parse(response.body) : null };
 };
+
+/**
+ * A connection as the database owner, for the handful of assertions that have
+ * to reach past the API to check that the *storage* refuses something rather
+ * than that a route does. `api_credentials` is RLS-enabled but not FORCEd --
+ * authentication resolves the tenant, so credential lookup necessarily happens
+ * before a tenant is known -- so the owner needs no tenant context here.
+ */
+async function asOwner(fn: (client: pg.Client) => Promise<void>) {
+  const client = new pg.Client({
+    connectionString: process.env['DATABASE_ADMIN_URL'] ?? ADMIN_URL,
+  });
+  await client.connect();
+  try {
+    await fn(client);
+  } finally {
+    await client.end();
+  }
+}
 
 beforeAll(async () => {
   resetDatabase();
@@ -108,6 +128,7 @@ describe('credentials', () => {
       principal_type: 'user',
       principal_id: marco.id,
       scopes: ['read', 'approvals:write'],
+      expires_in_seconds: 3600,
     });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(response.body.token).toMatch(/^scr_[0-9a-f]{16}\./);
@@ -163,6 +184,7 @@ describe('credentials', () => {
       principal_type: 'user',
       principal_id: users.body.users[0].id,
       scopes: ['wire:everything'],
+      expires_in_seconds: 3600,
     });
     expect(response.status).toBe(400);
     expect(response.body.error.message).toContain('unknown scope');
@@ -173,8 +195,103 @@ describe('credentials', () => {
       principal_type: 'user',
       principal_id: 'user_does_not_exist',
       scopes: ['read'],
+      expires_in_seconds: 3600,
     });
     expect(response.status).toBe(400);
+  });
+
+  it('refuses issuance with no lifetime at all', async () => {
+    // The gap this closes: `expires_in_seconds` used to be optional, and
+    // absent meant "until somebody revokes it" -- an immortal bearer token,
+    // which is the first thing a security review asks about.
+    const users = await call('GET', '/v1/users', admin);
+    const response = await call('POST', '/v1/credentials', admin, {
+      principal_type: 'user',
+      principal_id: users.body.users[0].id,
+      scopes: ['read'],
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('refuses a lifetime beyond the ninety-day cap', async () => {
+    const users = await call('GET', '/v1/users', admin);
+    const response = await call('POST', '/v1/credentials', admin, {
+      principal_type: 'user',
+      principal_id: users.body.users[0].id,
+      scopes: ['read'],
+      expires_in_seconds: 7_776_001,
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('will not represent a credential without an expiry, whatever writes it', async () => {
+    // The schema and the function both refuse; this is the layer underneath
+    // them, and the only one that holds against somebody with a connection
+    // rather than a token.
+    await expect(
+      asOwner(async (client) => {
+        await client.query(
+          `INSERT INTO scrutexity.api_credentials
+             (id, organization_id, principal_type, principal_id, token_prefix,
+              token_hash, scopes, expires_at)
+           SELECT 'cred_immortalZZZZZZZZZZZZZZZZZ', organization_id, principal_type,
+                  principal_id, 'scr_ffffffffffffffff', token_hash, scopes, NULL
+             FROM scrutexity.api_credentials LIMIT 1`,
+        );
+      }),
+    ).rejects.toThrow(/null value|not-null|violates/i);
+  });
+
+  it('stamps an expiry from database time, not the API node clock', async () => {
+    const users = await call('GET', '/v1/users', admin);
+    const response = await call('POST', '/v1/credentials', admin, {
+      principal_type: 'user',
+      principal_id: users.body.users[0].id,
+      scopes: ['read'],
+      expires_in_seconds: 3600,
+    });
+    expect(response.status).toBe(201);
+
+    // Both ends measured by one clock, so the difference is exactly what was
+    // asked for regardless of how far this process's clock has drifted.
+    const created = Date.parse(response.body.credential.created_at);
+    const expires = Date.parse(response.body.credential.expires_at);
+    expect(expires - created).toBe(3600 * 1000);
+  });
+
+  it('refuses an expired credential without revoking it', async () => {
+    const users = await call('GET', '/v1/users', admin);
+    const issued = await call('POST', '/v1/credentials', admin, {
+      principal_type: 'user',
+      principal_id: users.body.users[0].id,
+      scopes: ['read'],
+      expires_in_seconds: 60,
+    });
+    expect(issued.status).toBe(201);
+
+    // EXPIRED is not a stored status -- there is no such value in the enum.
+    // It is derived at every authentication from database time against
+    // expires_at, so moving the row's expiry into the past is enough.
+    await asOwner(async (client) => {
+      await client.query(
+        `UPDATE scrutexity.api_credentials
+            SET created_at = transaction_timestamp() - INTERVAL '2 hours',
+                expires_at = transaction_timestamp() - INTERVAL '1 hour'
+          WHERE id = $1`,
+        [issued.body.credential.id],
+      );
+    });
+
+    expect((await call('GET', '/v1/agents', issued.body.token)).status).toBe(401);
+
+    const listing = await call('GET', '/v1/credentials', admin);
+    const row = listing.body.credentials.find(
+      (c: { id: string }) => c.id === issued.body.credential.id,
+    );
+    // Still ACTIVE and unrevoked. Expiry and revocation are different facts,
+    // and an operator reading this listing must be able to tell them apart.
+    expect(row.status).toBe('ACTIVE');
+    expect(row.revoked_at).toBeNull();
   });
 
   it('revokes, and the same token fails on the very next request', async () => {
@@ -345,6 +462,7 @@ describe('resources, and the counterparty that could not be registered', () => {
       // By handle, which is what an operator has in front of them.
       principal_id: 'our-treasury-agent',
       scopes: ['read', 'authorization:evaluate'],
+      expires_in_seconds: 3600,
     });
     expect(credential.status, JSON.stringify(credential.body)).toBe(201);
     agentToken = credential.body.token;
@@ -524,6 +642,7 @@ async function createUserWithCredential(
     principal_type: 'user',
     principal_id: user.body.user.id,
     scopes,
+    expires_in_seconds: 3600,
   });
   expect(credential.status, JSON.stringify(credential.body)).toBe(201);
   return credential.body.token;
@@ -535,6 +654,7 @@ async function createAgentCredential(handle: string): Promise<string> {
     principal_type: 'agent',
     principal_id: handle,
     scopes: ['read', 'authorization:evaluate'],
+    expires_in_seconds: 3600,
   });
   expect(credential.status, JSON.stringify(credential.body)).toBe(201);
   return credential.body.token;

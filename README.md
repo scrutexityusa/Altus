@@ -14,6 +14,22 @@ that determines what they are permitted to do.
 The first vertical is treasury and payments. The long-term category is machine
 workforce identity and authority.
 
+### Two names, on purpose
+
+**Scrutexity** is the company and the code namespace. **Altus** is the product.
+
+|                                        |                                                          |
+| -------------------------------------- | -------------------------------------------------------- |
+| npm packages                           | `@scrutexity/core`, `@scrutexity/sdk`, `@scrutexity/api` |
+| PostgreSQL schema                      | `scrutexity`                                             |
+| CLI                                    | `altus` (`pnpm altus migrate`, `pnpm altus bootstrap`)   |
+| Environment variables owned by the CLI | `ALTUS_*`                                                |
+| Partner-facing documentation           | Altus, when describing the thing being deployed          |
+
+The split is deliberate, and it is the ordinary shape: HashiCorp ships Vault,
+GitLab ships Runner. Nothing here is mid-rename. If a document says
+"Scrutexity" where it means the deployed system, that is a bug in the document.
+
 ---
 
 ## Quick start

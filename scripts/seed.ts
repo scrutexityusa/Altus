@@ -66,6 +66,13 @@ export interface SeedResult {
   signal_source_keys: Record<string, { key_id: string; private_key_pem: string }>;
 }
 
+/**
+ * A day. The reference tenant is rebuilt by every `make demo` and every test
+ * run, so a long-lived credential here would only be a long-lived credential
+ * in somebody's shell history.
+ */
+const SEED_CREDENTIAL_TTL_SECONDS = 24 * 60 * 60;
+
 /** The signal sources the reference tenant trusts. Enrolment is mandatory. */
 const SIGNAL_SOURCES = ['external_fraud_engine', 'agent_self_report'] as const;
 
@@ -247,6 +254,7 @@ export async function seed(
       principal_type: 'user',
       principal_id: installation.admin_user_id,
       scopes: [...USERS[0].scopes],
+      expires_in_seconds: SEED_CREDENTIAL_TTL_SECONDS,
     });
     tokens['admin'] = adminCredential.token;
 
@@ -261,6 +269,7 @@ export async function seed(
         principal_type: 'user',
         principal_id: user.user.id,
         scopes: [...spec.scopes],
+        expires_in_seconds: SEED_CREDENTIAL_TTL_SECONDS,
       });
       tokens[spec.key] = credential.token;
     }
@@ -278,6 +287,7 @@ export async function seed(
         principal_type: 'agent',
         principal_id: spec.handle,
         scopes: [...spec.scopes],
+        expires_in_seconds: SEED_CREDENTIAL_TTL_SECONDS,
       });
       tokens[`${spec.key}_agent`] = credential.token;
     }
@@ -328,6 +338,7 @@ export async function seed(
       principal_type: 'service',
       principal_id: 'svc_fraud_engine',
       scopes: ['signals:write'],
+      expires_in_seconds: SEED_CREDENTIAL_TTL_SECONDS,
     });
     tokens['fraud_engine'] = fraudCredential.token;
 
