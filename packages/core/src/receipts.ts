@@ -162,15 +162,35 @@ export function verifyReceipt(receipt: Receipt, verifier?: ReceiptVerifier): Ver
         : `receipt hash mismatch: recorded ${receipt.hash}, recomputed ${recomputedLink}`,
   });
 
-  if (receipt.signature && verifier) {
+  // An unsigned receipt is a *failed* check, never an absent one.
+  //
+  // SHA-256 is public, so the chain on its own stops nobody who can write to
+  // the table: rewrite a receipt, recompute its payload and link hashes,
+  // re-link every receipt after it, and the structure verifies perfectly. The
+  // signature is the entire difference between "tamper-evident" and "tidy".
+  //
+  // Skipping the check when `signature` is null therefore handed a forger the
+  // trapdoor: they cannot mint a signature, but they could *drop* the one they
+  // could not mint, and the chain still reported intact. Verification now
+  // treats a missing signature as the strongest possible evidence of tampering
+  // rather than as nothing to look at.
+  if (verifier) {
+    const signature = receipt.signature;
     const ok =
-      receipt.signing_key_id === verifier.keyId && verifier.verify(receipt.hash, receipt.signature);
+      signature !== null &&
+      signature !== '' &&
+      receipt.signing_key_id === verifier.keyId &&
+      verifier.verify(receipt.hash, signature);
     checks.push({
       check: 'SIGNATURE',
       passed: ok,
       detail: ok
         ? `signature verified against key ${verifier.keyId}`
-        : `signature did not verify against key ${verifier.keyId}`,
+        : signature === null || signature === ''
+          ? 'receipt carries no signature; an unsigned receipt in a signed chain is evidence of tampering'
+          : receipt.signing_key_id !== verifier.keyId
+            ? `receipt was signed by key ${receipt.signing_key_id ?? '(none)'}, not ${verifier.keyId}`
+            : `signature did not verify against key ${verifier.keyId}`,
     });
   } else if (receipt.signature) {
     checks.push({
