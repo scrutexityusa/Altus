@@ -848,3 +848,137 @@ describe('the provider succeeded and settlement never happened', () => {
     expect(again.body.external_reference).toBe(first.body.external_reference);
   });
 });
+
+/**
+ * ============================================================================
+ * Omission.
+ * ============================================================================
+ *
+ * Every attack above changes something: a mutated amount, a swapped resource,
+ * a substituted decision. None of them removes something, and that asymmetry
+ * is how a real hole survived in the evidence chain -- verification skipped
+ * the signature check whenever the signature was absent, so the attack was to
+ * delete the signature rather than forge it.
+ *
+ * The general shape: a control that runs `if (field) { check(field) }` is not
+ * a control, because the attacker chooses whether `field` is there. These
+ * tests exist so that shape cannot reappear on the enforcement path without a
+ * test going red.
+ */
+describe('a missing field is a refusal, not a skipped check', () => {
+  const BINDING_COLUMNS = [
+    'exact_intent_hash',
+    'binding_hash',
+    'binding_nonce',
+    'authorized_intent',
+  ] as const;
+
+  it('will not let an existing grant be doctored in place at all', async () => {
+    const { decision } = await authorisedWire('omit-update');
+
+    // The first layer, and the one an attacker meets first. Removing a field
+    // from a live grant is not refused later by the boundary -- it is refused
+    // here, by a trigger, before the row can change shape.
+    await expect(
+      asOwner(async (client) => {
+        await client.query(
+          `UPDATE scrutexity.authorization_decisions SET binding_hash = NULL WHERE id = $1`,
+          [decision.decision_id],
+        );
+      }),
+    ).rejects.toThrow(/append-only/);
+  });
+
+  it('will not represent a grant with only some of its binding removed', async () => {
+    const { decision } = await authorisedWire('omit-partial');
+
+    // The second layer. Even inserting a fresh row, the four binding fields
+    // move together: a grant is bound or it is not, and there is no shape in
+    // between for an attacker to aim at.
+    await expect(insertDecisionCopy(decision.decision_id, ['binding_hash'])).rejects.toThrow(
+      /binding_complete/,
+    );
+  });
+
+  it('refuses to execute a grant that carries no binding at all', async () => {
+    const { decision, operation } = await authorisedWire('omit-binding');
+
+    // The third layer, and the one that has to hold for rows written before
+    // ADR-0015 existed. Nothing to compare against is not nothing to check.
+    const forgedId = await insertDecisionCopy(decision.decision_id, BINDING_COLUMNS);
+
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: forgedId,
+      operation,
+    });
+
+    expect(result.status).not.toBe(201);
+    expect(result.body.error?.code, JSON.stringify(result.body)).toBe('STATE_CONFLICT');
+    expect(await securityEvents('EXECUTION_UNBINDABLE_GRANT')).not.toHaveLength(0);
+  });
+
+  it('refuses an operation presented with a bound context field deleted', async () => {
+    const { decision, operation } = await authorisedWire('omit-context-field');
+    const { counterparty_id: _removed, ...context } = operation.context as Record<string, unknown>;
+
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation: { ...operation, context },
+    });
+
+    // Whether the action catalog rejects it as malformed or the binding
+    // rejects it as a different operation, the one unacceptable outcome is a
+    // payment.
+    expect(result.status).not.toBe(201);
+    expect(result.body.error?.code, JSON.stringify(result.body)).not.toBe(undefined);
+  });
+
+  it('refuses an operation presented with no context at all', async () => {
+    const { decision, operation } = await authorisedWire('omit-context');
+
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation: { action: operation.action, resource: operation.resource },
+    });
+
+    expect(result.status).not.toBe(201);
+    expect(result.body.error?.code, JSON.stringify(result.body)).not.toBe(undefined);
+  });
+});
+
+/**
+ * Copies a decision row, nulling the named columns, and returns the new id.
+ *
+ * Written against information_schema rather than a hand-kept column list so
+ * that a column added tomorrow is copied too -- a stale list here would
+ * quietly stop testing whatever was added last.
+ */
+async function insertDecisionCopy(sourceId: string, nulled: readonly string[]): Promise<string> {
+  // Same shape as a real id -- `dec_` plus 26 Crockford base32 characters --
+  // with the tail replaced so it cannot collide with the row being copied.
+  const forgedId = `${sourceId.slice(0, 26)}ZZZZ`;
+  await asOwner(async (client) => {
+    const columns = (
+      await client.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema = 'scrutexity' AND table_name = 'authorization_decisions'
+          ORDER BY ordinal_position`,
+      )
+    ).rows.map((row) => row['column_name'] as string);
+
+    const projection = columns
+      .map((column) => {
+        if (column === 'id') return '$2';
+        if (nulled.includes(column)) return 'NULL';
+        return `"${column}"`;
+      })
+      .join(', ');
+
+    await client.query(
+      `INSERT INTO scrutexity.authorization_decisions (${columns.map((c) => `"${c}"`).join(', ')})
+       SELECT ${projection} FROM scrutexity.authorization_decisions WHERE id = $1`,
+      [sourceId, forgedId],
+    );
+  });
+  return forgedId;
+}

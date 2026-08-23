@@ -108,6 +108,19 @@ Each of these is a place we made a choice. If a choice is wrong, this is where.
    timing, response shape, error text — that distinguishes "exists" from "not yours".
 7. **Signals subtract only.** _Attack:_ find any input, from a source holding a
    valid key, that makes an outcome more permissive.
+8. **Omission is the attack we were worst at.** A control written as
+   `if (field) { check(field) }` is not a control, because the attacker chooses
+   whether `field` is there. We found one: receipt verification skipped the
+   signature check whenever the signature was absent, so a forger with database
+   write access could rewrite a receipt, recompute both hashes, re-link the
+   tail, and simply **delete** the signature they could not mint — and the chain
+   reported intact. It is fixed and regression-tested, and the signal plane had
+   the same shape once before that (a signature against an unenrolled source was
+   ignored rather than refused). _Attack:_ find the third one. Remove a field
+   rather than change it — a signature, a key id, a nonce, a hash, a header, a
+   context key — and see which check stops running. Our test suite was, until
+   recently, almost entirely mutation and substitution; assume the omission
+   coverage is the thinnest.
 
 ## Already covered
 
