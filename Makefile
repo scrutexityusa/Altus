@@ -122,6 +122,13 @@ lint: ## Check formatting, types and contract drift
 	pnpm exec tsx scripts/generate-specs.ts --check
 	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
+.PHONY: bench
+bench: ## Measure decision and enforcement latency against a real database
+	# Deliberately not part of `make ci`: the numbers depend on the machine, so
+	# a CI threshold would either be so loose it proves nothing or so tight it
+	# fails on a noisy runner. Run it, read it, and put the numbers in a doc.
+	pnpm exec tsx scripts/bench.ts
+
 .PHONY: spec
 spec: ## Regenerate the OpenAPI and policy schema from the code
 	pnpm exec tsx scripts/generate-specs.ts
