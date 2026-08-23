@@ -34,7 +34,7 @@ own opinion. That is the intent — the system's own proof is the pitch.
 
 ## Honest state, in one place
 
-- **596 tests**, 11/11 adversarial invariants, 3/3 recovery scenarios.
+- **609 tests**, 12/12 adversarial invariants, 3/3 recovery scenarios.
 - **No key manager is wired.** Production requires one and refuses to start
   without it, so **no deployment has run in a production posture.** Wiring a
   partner's chosen manager is scoped week-one work

@@ -118,13 +118,21 @@ Each of these is a place we made a choice. If a choice is wrong, this is where.
    the same shape once before that (a signature against an unenrolled source was
    ignored rather than refused). _Attack:_ find the third one. Remove a field
    rather than change it — a signature, a key id, a nonce, a hash, a header, a
-   context key — and see which check stops running. Our test suite was, until
-   recently, almost entirely mutation and substitution; assume the omission
-   coverage is the thinnest.
+   context key — and see which check stops running.
+
+   It is now generated rather than hand-written: **A12** in `make adversarial`
+   takes every security-bearing field of five endpoints and sends six
+   corruptions each — key deleted, `null`, `""`, `[]`, `{}`, wrong type — and
+   requires a refusal for all 213. Each endpoint also declares the fields a
+   caller _may_ omit, with a reason; that list is the reviewed set of what a
+   request is allowed to leave out, and it is a better place to start than the
+   assertions. Note what A12 does **not** cover: anything reachable only with a
+   database connection, and any field of a response rather than a request.
+   Both are open.
 
 ## Already covered
 
-`make adversarial` — 11 invariants, mounted as real attacks against a real
+`make adversarial` — 12 invariants, mounted as real attacks against a real
 database through the public API. The registry is `test/adversarial-manifest.json`;
 a scenario declared there with no implementation fails the run.
 
@@ -156,8 +164,8 @@ determinism, and "no ALLOW without covering authority".
 ```bash
 git clone <repo> && cd Altus
 make dev            # Postgres, migrations, seeded tenant
-make ci             # 596 tests, lint, build, demo, adversarial, recovery
-make adversarial    # the 11 invariants alone
+make ci             # 609 tests, lint, build, demo, adversarial, recovery
+make adversarial    # the 12 invariants alone
 make recovery       # the SIGKILL harness alone
 make demo           # the treasury story, asserted end to end
 ```

@@ -122,6 +122,13 @@ lint: ## Check formatting, types and contract drift
 	pnpm exec tsx scripts/generate-specs.ts --check
 	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
+.PHONY: onboarding
+onboarding: ## Run docs/design-partner/onboarding.md exactly as a partner would
+	# The suite exercises the endpoints through an in-process harness, which is
+	# why it never noticed that the guide's step 2 produced a file jq refused to
+	# parse. This runs the shell a partner copies.
+	scripts/onboarding-check.sh
+
 .PHONY: bench
 bench: ## Measure decision and enforcement latency against a real database
 	# Deliberately not part of `make ci`: the numbers depend on the machine, so
@@ -140,4 +147,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test build demo adversarial recovery ## Everything CI runs
+ci: install lint test build demo adversarial recovery onboarding ## Everything CI runs
