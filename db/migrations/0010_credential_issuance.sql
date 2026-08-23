@@ -42,6 +42,22 @@ SET search_path = scrutexity, public;
 -- alone cannot answer "when did this stop working", which is the first question
 -- asked during an incident.
 ALTER TABLE api_credentials ADD COLUMN revoked_at TIMESTAMPTZ;
+
+-- A row already marked REVOKED predates this column and has no recorded
+-- instant, so the constraint below would refuse the migration on any database
+-- where somebody had revoked something. That is not hypothetical: the down
+-- migration drops this column, so a rollback and reapply -- which CI performs
+-- on every run, because a migration without a working down migration is a
+-- one-way door -- hits it on the second pass.
+--
+-- `now()` rather than `created_at`. Neither is the truth, which is gone; the
+-- choice is which direction to be wrong in. Recording the migration's own
+-- instant says "revoked no later than this", which never understates how long
+-- the credential was live. Backdating to creation would claim it was dead
+-- during a window nobody can prove it was.
+UPDATE api_credentials SET revoked_at = now()
+ WHERE status = 'REVOKED' AND revoked_at IS NULL;
+
 ALTER TABLE api_credentials
   ADD CONSTRAINT api_credentials_revoked_shape
   CHECK ((status = 'REVOKED') = (revoked_at IS NOT NULL));

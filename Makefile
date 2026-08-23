@@ -79,7 +79,7 @@ demo: build ## Run the full treasury demo from a clean database
 	pnpm exec tsx scripts/demo.ts
 
 .PHONY: adversarial
-adversarial: build ## Run the adversarial conformance suite (11 security invariants)
+adversarial: build ## Run the adversarial conformance suite (12 security invariants)
 	# Not an alias for a subset of the unit tests. Each scenario mounts a real
 	# attack through the public API against a real database, and reports
 	# whether the invariant held, whether the provider was contacted, and what
@@ -102,7 +102,10 @@ test: ## Run every test
 
 .PHONY: test-unit
 test-unit: ## Run the pure-domain tests (no database required)
-	pnpm exec vitest run packages
+	# Its own configuration, with no globalSetup, so "no database required" is
+	# enforced rather than described. CI's first job runs exactly this line in a
+	# container with no PostgreSQL.
+	pnpm exec vitest run --config vitest.unit.config.ts
 
 .PHONY: typecheck
 typecheck: ## Typecheck every package, sources and tests
