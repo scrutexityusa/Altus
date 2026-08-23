@@ -27,8 +27,13 @@ COPY services/api/package.json services/api/
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts
 
 COPY --from=build /app/packages/core/dist packages/core/dist
-COPY --from=build /app/packages/sdk/dist packages/sdk/dist
 COPY --from=build /app/services/api/dist services/api/dist
+# No `packages/sdk/dist`. The SDK is a client library for callers; the control
+# plane imports nothing from it, `tsc -b services/api` therefore never builds
+# it, and `--prod` skips it (it is a root devDependency) so it is not even
+# linked into node_modules here. Copying it failed the build outright once the
+# image job started running at all -- the layer referred to a directory the
+# build stage had no reason to produce.
 # Migrations travel with the image so the migration Job and the service can
 # never disagree about which schema version they expect.
 COPY db ./db
