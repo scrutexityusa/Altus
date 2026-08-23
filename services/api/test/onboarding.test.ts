@@ -167,7 +167,29 @@ describe('credentials', () => {
     ]);
   });
 
+  it('does not write last_used_at on the request path', async () => {
+    // Pinning the trade deliberately rather than leaving it to be rediscovered.
+    // The credential authenticated in the test above; nothing has flushed yet,
+    // so the column is still null. If this test ever fails because the value
+    // is present, somebody has put a write back in front of every request --
+    // which is what migration 0012 removed and what the latency baseline
+    // measured at roughly a fifth of an authorize's commits.
+    const listing = await call('GET', '/v1/credentials', admin);
+    const row = listing.body.credentials.find(
+      (c: { id: string }) => c.id === treasurerCredentialId,
+    );
+    expect(row.last_used_at).toBeNull();
+  });
+
   it('records that the credential has been used', async () => {
+    // Last-used tracking is buffered off the request path (migration 0012), so
+    // the write happens on a flush rather than inside the request. Flushing
+    // here rather than sleeping past the interval keeps the test honest about
+    // what it is asserting: that a use is eventually recorded, not that it is
+    // recorded synchronously -- which is exactly the property that was traded
+    // away for a transaction per request.
+    await app.credentialUse.flush();
+
     // `last_used_at` was a column nothing ever wrote. Exposing it unpopulated
     // would tell an operator a credential in daily use had never been used --
     // which is exactly the fact they would revoke on.

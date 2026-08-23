@@ -68,10 +68,20 @@ curl -sS -X POST $ALTUS/v1/credentials/$OLD_ID/revoke \
   -H "authorization: Bearer $ADMIN" | jq -c '.credential | {status, revoked_at}'
 ```
 
-Step 3 is the one people skip. `last_used_at` is written on every successful
-authentication (coarsened to five minutes, so it is not a row update in front
-of every request), and it is how you tell that the deploy in step 2 actually
-took. Revoking on faith is how a rotation becomes an incident.
+Step 3 is the one people skip. `last_used_at` is how you tell that the deploy
+in step 2 actually took, and revoking on faith is how a rotation becomes an
+incident.
+
+**Give it a minute.** Last-used tracking is buffered off the request path and
+flushed on an interval (60 seconds by default, `CREDENTIAL_USE_FLUSH_MS`), so a
+credential that started carrying traffic ten seconds ago may still read as
+unused. It is telemetry, deliberately: nothing authorises on it, nothing
+expires on it, and no decision reads it — so it is not worth a database
+transaction in front of every request. A process killed between flushes loses
+up to one interval of it.
+
+Revocation is not buffered. `status` is read on the request's own connection
+every time, so a revoke still takes effect on the very next request.
 
 ## Deciding what to rotate
 

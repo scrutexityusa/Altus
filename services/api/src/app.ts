@@ -5,6 +5,7 @@ import { loadConfig, type Config } from './config.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabase, type Database } from './db/pool.js';
 import { authenticate } from './auth.js';
+import { startCredentialUseTracker, type CredentialUseTracker } from './services/credential-use.js';
 import { toErrorResponse } from './errors.js';
 import { metrics, renderMetrics } from './metrics.js';
 import { loadEvidenceKeys, type EvidenceKeys } from './services/evidence.js';
@@ -23,6 +24,12 @@ export interface App {
    * compares this against the committed OpenAPI document, so a route added
    * without documenting it fails the build. */
   routes: string[];
+  /**
+   * Buffered credential last-used tracking. Exposed so a test can flush
+   * deterministically rather than sleep past an interval -- a test that waits
+   * for a timer is a test that is flaky on a loaded machine.
+   */
+  credentialUse: CredentialUseTracker;
   close(): Promise<void>;
 }
 
@@ -64,6 +71,9 @@ export async function buildApp(
   const logger = createLogger(config);
   const db = createDatabase(config);
   const keys = await loadEvidenceKeys(config, loadSecretProvider(config));
+  // Buffers credential last-used ids off the request path -- see
+  // services/credential-use.ts for what that trades away and why.
+  const credentialUse = startCredentialUseTracker(db, config.CREDENTIAL_USE_FLUSH_MS);
   const providers = providerOverride ?? loadProviders(config);
 
   const server = Fastify({
@@ -97,7 +107,7 @@ export async function buildApp(
 
   server.addHook('preHandler', async (request) => {
     if (PUBLIC_PATHS.has(request.url.split('?')[0]!)) return;
-    request.principal = await authenticate(db, request.headers.authorization);
+    request.principal = await authenticate(db, request.headers.authorization, credentialUse);
   });
 
   server.addHook('onResponse', async (request, reply) => {
@@ -180,8 +190,12 @@ export async function buildApp(
     keys,
     logger,
     routes,
+    credentialUse,
     close: async () => {
       await server.close();
+      // Before the pool closes, and after the server stops accepting: whatever
+      // authenticated in the last interval is written rather than dropped.
+      await credentialUse.close();
       await db.close();
     },
   };

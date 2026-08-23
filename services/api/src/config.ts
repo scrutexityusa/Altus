@@ -12,6 +12,15 @@ const ConfigSchema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   DATABASE_URL: z.string().min(1),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(200).default(10),
+  /**
+   * How often buffered credential last-used ids are written.
+   *
+   * Also the worst-case telemetry loss if the process dies: nothing
+   * authorises on `last_used_at`, so this is a knob over how stale an
+   * operator's "is anything still using this credential" view may be, not a
+   * security parameter. Tests set it low to make a flush observable.
+   */
+  CREDENTIAL_USE_FLUSH_MS: z.coerce.number().int().min(100).max(3_600_000).default(60_000),
   RECEIPT_SIGNING_KEY_ID: z.string().min(1).default('dev-local-1'),
   /**
    * Base64-encoded PKCS#8 PEM of an Ed25519 private key.
