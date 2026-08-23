@@ -221,7 +221,7 @@ product-market fit, not a work order.
 If the room wants to see the security work rather than the story:
 
 ```bash
-make adversarial   # 11 invariants, mounted as real attacks against a real database
+make adversarial   # 12 invariants, mounted as real attacks against a real database
 make recovery      # SIGKILL the API mid-payment; assert what survived
 ```
 

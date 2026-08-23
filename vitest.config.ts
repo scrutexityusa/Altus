@@ -1,31 +1,17 @@
-import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
+import { common, resolve } from './vitest.shared.js';
 
-const src = (path: string) => fileURLToPath(new URL(path, import.meta.url));
-
+/**
+ * The whole suite: pure domain, integration, security and contracts.
+ *
+ * Needs a reachable PostgreSQL cluster. `vitest.unit.config.ts` is the half
+ * that does not.
+ */
 export default defineConfig({
-  resolve: {
-    /**
-     * Workspace packages resolve to their TypeScript source, not to `dist`.
-     *
-     * Two reasons, both learned the hard way. A build artifact is stale by
-     * default: a test suite that imports `dist` can pass against code that no
-     * longer exists in `src`, which is precisely the failure an authorization
-     * test suite must never have. And it makes the suite hermetic -- `vitest
-     * run` works on a clean checkout with no build step, so CI cannot fail for
-     * a reason that has nothing to do with the code under test.
-     *
-     * `dist` remains the right entry point for real consumers: the container
-     * image runs compiled JavaScript, and package.json exports point there.
-     */
-    alias: {
-      '@scrutexity/core': src('./packages/core/src/index.ts'),
-      '@scrutexity/sdk': src('./packages/sdk/src/index.ts'),
-    },
-  },
+  resolve,
   test: {
+    ...common,
     include: ['packages/**/*.test.ts', 'services/**/*.test.ts', 'spec/**/*.test.ts'],
-    environment: 'node',
     // Provisions and drops a database for this run. Tests never touch the
     // development database -- they disable append-only triggers and reset
     // schemas, which is not something to point at data anyone cares about.
@@ -33,7 +19,5 @@ export default defineConfig({
     // Integration tests share one Postgres database; running files in parallel
     // would interleave tenant fixtures. Correctness beats a faster suite.
     fileParallelism: false,
-    testTimeout: 30_000,
-    hookTimeout: 30_000,
   },
 });

@@ -85,6 +85,7 @@
                   "UNAUTHORIZED",
                   "FORBIDDEN",
                   "INVALID_REQUEST",
+                  "INVALID_CREDENTIAL_TTL",
                   "POLICY_DENIED",
                   "APPROVAL_REQUIRED",
                   "AUTHORITY_MISSING",
@@ -1447,13 +1448,14 @@
               "expires_in_seconds": {
                 "type": "integer",
                 "minimum": 60,
-                "maximum": 31536000
+                "maximum": 7776000
               }
             },
             "required": [
               "principal_type",
               "principal_id",
-              "scopes"
+              "scopes",
+              "expires_in_seconds"
             ],
             "additionalProperties": false
           }

@@ -226,6 +226,7 @@ async function main() {
     A9: crashBeforeProvider,
     A10: providerSuccessSettlementCrash,
     A11: transactionFaultInjection,
+    A12: omission,
   };
 
   const results: Outcome[] = [];
@@ -294,6 +295,317 @@ function report(results: Outcome[]) {
 
   const line = `RESULT: ${held}/${results.length} SECURITY INVARIANTS HOLD`;
   process.stdout.write(`\n  ${held === results.length ? green(bold(line)) : red(bold(line))}\n\n`);
+}
+
+// ---------------------------------------------------------------------------
+// A12 -- the omission attack class
+// ---------------------------------------------------------------------------
+
+/**
+ * Every other scenario here attacks by *changing* something. This one attacks
+ * by taking something away, which is the axis the suite was blind on and the
+ * axis that produced both holes found so far:
+ *
+ *   signal plane          a signature against an unenrolled source was
+ *                         ignored rather than refused, so attaching any bytes
+ *                         at all was equivalent to attaching none
+ *   evidence chain        verification skipped the signature check whenever
+ *                         `signature` was null, so a forger with database
+ *                         write access deleted the signature they could not
+ *                         mint and the chain reported intact
+ *
+ * The shape both share: a control written as `if (field) { check(field) }` is
+ * not a control, because the attacker chooses whether `field` is there.
+ *
+ * So rather than a handful of hand-written cases, this generates them. For
+ * each security-bearing field of each request, it sends six corruptions and
+ * requires a refusal for all of them.
+ */
+const OMISSION_VARIANTS = [
+  { name: 'absent', apply: (): typeof ABSENT => ABSENT },
+  { name: 'null', apply: () => null },
+  { name: 'empty string', apply: () => '' },
+  { name: 'empty array', apply: () => [] },
+  { name: 'empty object', apply: () => ({}) },
+  // Not omission strictly, but the same family: the field is present and
+  // carries nothing the checker can use. A validator that reaches for
+  // `.length` or `.type` on this is one that was never asked the question.
+  //
+  // `true` rather than `0`, because `0` is a legitimate spelling of an amount
+  // -- the API accepts an integer number of major units and normalises it the
+  // same way it normalises "0.00". A boolean is a value no field here takes.
+  { name: 'wrong type', apply: () => true },
+] as const;
+
+/** Sentinel meaning "delete this key" rather than "set it to undefined". */
+const ABSENT = Symbol('absent');
+
+function corrupt(body: unknown, path: string, value: unknown): unknown {
+  const clone = structuredClone(body) as Record<string, unknown>;
+  const segments = path.split('.');
+  let cursor: Record<string, unknown> = clone;
+  for (const segment of segments.slice(0, -1)) {
+    const next = cursor[segment];
+    if (typeof next !== 'object' || next === null) return clone;
+    cursor = next as Record<string, unknown>;
+  }
+  const leaf = segments[segments.length - 1]!;
+  if (value === ABSENT) delete cursor[leaf];
+  else cursor[leaf] = value;
+  return clone;
+}
+
+interface OmissionTarget {
+  name: string;
+  path: string;
+  token: (c: Ctx) => string;
+  /** A body that is known to succeed, rebuilt per call so nothing is reused. */
+  body: (c: Ctx) => Promise<Record<string, unknown>>;
+  /** Dot paths whose corruption must be refused. */
+  required: readonly string[];
+  /**
+   * Dot paths a caller may legitimately omit, and why.
+   *
+   * This list is the point of the exercise as much as the assertions are: it
+   * is the complete, reviewed set of things a request is allowed to leave out.
+   * A field belongs here only with a reason somebody would defend out loud.
+   */
+  optional: Readonly<Record<string, string>>;
+  /**
+   * What counts as the attack having worked.
+   *
+   * Not simply `status < 400`. `POST /v1/authorization/evaluate` answers a
+   * refusal with **200 and `decision: DENY`** -- the request was well-formed
+   * and the answer is no. Treating that as acceptance was the first thing this
+   * generator got wrong, and it reported five holes that were not there.
+   */
+  accepted: (response: { status: number; body: any }) => boolean;
+}
+
+const acceptedByStatus = (response: { status: number }) => response.status < 400;
+
+async function omission(c: Ctx) {
+  const targets: OmissionTarget[] = [
+    {
+      name: 'POST /v1/authorization/evaluate',
+      path: '/v1/authorization/evaluate',
+      token: (ctx) => ctx.t['treasury_agent']!,
+      body: async (ctx) => {
+        await issueLease(ctx);
+        return wire({ nonce: nonce('a12-eval') });
+      },
+      required: [
+        'agent_id',
+        'action',
+        'resource',
+        'resource.type',
+        'resource.id',
+        'context',
+        'context.amount',
+        'context.currency',
+        'context.counterparty_id',
+      ],
+      // An ALLOW is the only outcome that hands out authority. A DENY at 200 is
+      // the control working, and an ESCALATE issues no execution grant.
+      accepted: (response) => response.status < 400 && response.body?.decision === 'ALLOW',
+      optional: {
+        nonce:
+          'client-side replay protection; omitting it forgoes the caller’s own idempotency and grants nothing',
+        'context.destination_country':
+          'a policy input, not an identity: absent means the sanctions condition does not match, which is the fail-closed direction',
+      },
+    },
+    {
+      name: 'POST /v1/execute',
+      path: '/v1/execute',
+      token: (ctx) => ctx.t['treasury_agent']!,
+      body: async (ctx) => {
+        const { decision, operation } = await allow(ctx, 'a12-exec');
+        return { decision_id: decision.decision_id, operation };
+      },
+      required: [
+        'decision_id',
+        'operation',
+        'operation.action',
+        'operation.resource',
+        'operation.resource.type',
+        'operation.resource.id',
+        'operation.context',
+        'operation.context.amount',
+        'operation.context.currency',
+        'operation.context.counterparty_id',
+      ],
+      optional: {},
+      accepted: acceptedByStatus,
+    },
+    {
+      name: 'POST /v1/authority-leases',
+      path: '/v1/authority-leases',
+      token: (ctx) => ctx.t['admin']!,
+      body: async () => ({
+        agent_id: 'treasury-agent',
+        grant: {
+          actions: ['wire.execute'],
+          resources: { bank_account: ['acct_001'], counterparty: ['cp_100'] },
+          constraints: {
+            max_amount: { currency: 'USD', amount: '50000.00' },
+            currencies: ['USD'],
+            allowed_counterparties: ['cp_100'],
+          },
+        },
+        ttl_seconds: 3600,
+      }),
+      required: ['agent_id', 'grant', 'grant.actions', 'ttl_seconds'],
+      optional: {
+        'grant.constraints':
+          'a grant with no constraints is still bounded by its actions and resources, and the issuance ceiling is checked either way',
+        'grant.resources':
+          'absent means NO resources, not all of them -- proved by resourcelessLeaseAuthorisesNothing below rather than asserted here',
+      },
+      accepted: acceptedByStatus,
+    },
+    {
+      name: 'POST /v1/signals',
+      path: '/v1/signals',
+      token: (ctx) => ctx.t['fraud_engine']!,
+      body: async (ctx) =>
+        signedSignal(ctx.fixtures, {
+          subject: { type: 'agent', id: ctx.fixtures.agents['treasury']! },
+          signal_type: 'fraud_risk',
+          value: '0.01',
+          source: 'external_fraud_engine',
+          ttl_seconds: 600,
+          event_id: nonce('a12-signal'),
+        }) as unknown as Record<string, unknown>,
+      required: [
+        'source',
+        'subject',
+        'subject.type',
+        'subject.id',
+        'signal_type',
+        'value',
+        'signature',
+        'signing_key_id',
+      ],
+      accepted: acceptedByStatus,
+      optional: {
+        ttl_seconds:
+          'a signal with no stated lifetime takes the policy’s default, which is shorter than any caller would choose',
+      },
+    },
+    {
+      name: 'POST /v1/credentials',
+      path: '/v1/credentials',
+      token: (ctx) => ctx.t['admin']!,
+      body: async (ctx) => ({
+        principal_type: 'user',
+        principal_id: ctx.fixtures.users['treasurer']!,
+        scopes: ['read'],
+        expires_in_seconds: 3600,
+      }),
+      required: ['principal_type', 'principal_id', 'scopes', 'expires_in_seconds'],
+      optional: {},
+      accepted: acceptedByStatus,
+    },
+  ];
+
+  let checked = 0;
+  const failures: string[] = [];
+
+  for (const target of targets) {
+    // The control. Without this the whole scenario passes vacuously the moment
+    // a body stops being valid for an unrelated reason -- every corruption is
+    // refused, and so is the thing they were corruptions of.
+    const control = await c.call('POST', target.path, target.token(c), await target.body(c));
+    if (control.status >= 400) {
+      failures.push(
+        `${target.name}: the uncorrupted control was refused (${control.status} ` +
+          `${JSON.stringify(control.body)}), so nothing below proves anything`,
+      );
+      continue;
+    }
+
+    for (const field of target.required) {
+      for (const variant of OMISSION_VARIANTS) {
+        const body = corrupt(await target.body(c), field, variant.apply());
+        const response = await c.call('POST', target.path, target.token(c), body);
+        checked += 1;
+        if (target.accepted(response)) {
+          failures.push(
+            `${target.name}: ${field} = ${variant.name} was ACCEPTED ` +
+              `(${response.status} ${response.body?.decision ?? ''})`,
+          );
+        }
+      }
+    }
+  }
+
+  checked += await resourcelessLeaseAuthorisesNothing(c, failures);
+
+  assert(failures.length === 0, failures.join('; '));
+  return {
+    // The count is in the summary rather than buried in a failure message: a
+    // generator that silently stopped generating would otherwise still read as
+    // a pass.
+    evidence: `${checked} refusals`,
+    detail: `${checked} corruptions across ${targets.length} endpoints, all refused`,
+  };
+}
+
+/**
+ * The one omission the lease endpoint accepts, held to what it must mean.
+ *
+ * A grant with no `resources` is issued. That is only safe if absent means
+ * *no* resources rather than *all* of them -- the difference between a useless
+ * lease and unbounded authority conjured out of a missing key. Exempting the
+ * field in the `optional` list would assert that in a comment; this proves it.
+ */
+async function resourcelessLeaseAuthorisesNothing(c: Ctx, failures: string[]): Promise<number> {
+  const issued = await c.call('POST', '/v1/authority-leases', c.t['admin']!, {
+    agent_id: 'verification-agent',
+    grant: {
+      actions: ['wire.execute'],
+      constraints: {
+        max_amount: { currency: 'USD', amount: '50000.00' },
+        currencies: ['USD'],
+        allowed_counterparties: ['cp_100'],
+      },
+    },
+    ttl_seconds: 3600,
+  });
+  if (issued.status !== 201) {
+    // Refusing to issue it is also a correct answer, and a stricter one.
+    return 1;
+  }
+
+  // A second agent with no other lease, so nothing else can be the source of
+  // an ALLOW. Under the resource-less grant, every resource must be refused.
+  for (const account of ['acct_001', 'acct_002', 'acct_999']) {
+    const decision = await c.call(
+      'POST',
+      '/v1/authorization/evaluate',
+      c.t['verification_agent']!,
+      {
+        agent_id: 'verification-agent',
+        action: 'wire.execute',
+        resource: { type: 'bank_account', id: account },
+        context: {
+          amount: '25000.00',
+          currency: 'USD',
+          counterparty_id: 'cp_100',
+          destination_country: 'US',
+        },
+        nonce: nonce(`a12-resourceless-${account}`),
+      },
+    );
+    if (decision.body?.decision === 'ALLOW') {
+      failures.push(
+        `a lease with no grant.resources authorised ${account}: ` +
+          'an omitted field granted more than any present value could',
+      );
+    }
+  }
+  return 3;
 }
 
 // ---------------------------------------------------------------------------

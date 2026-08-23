@@ -14,7 +14,7 @@ docker compose up -d          # PostgreSQL 16
 pnpm altus migrate
 
 ALTUS_BOOTSTRAP_DATABASE_URL=postgres://scrutexity_owner:scrutexity@127.0.0.1:5432/scrutexity \
-  pnpm altus bootstrap --org-name "Example Treasury" \
+  pnpm --silent altus bootstrap --org-name "Example Treasury" \
                        --admin-name "Jane Smith" \
                        --admin-email "jane@example.com"
 

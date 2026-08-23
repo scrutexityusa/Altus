@@ -7,6 +7,13 @@ export const ERROR_CODES = [
   'UNAUTHORIZED',
   'FORBIDDEN',
   'INVALID_REQUEST',
+  /**
+   * A credential was requested with no lifetime, or with one beyond the
+   * maximum. Separate from INVALID_REQUEST because it is the one validation
+   * failure an operator will hit while following a runbook, and "your token
+   * request had a bad field" is a worse message than one that names the rule.
+   */
+  'INVALID_CREDENTIAL_TTL',
   // Authorization outcomes
   'POLICY_DENIED',
   'APPROVAL_REQUIRED',
@@ -73,6 +80,7 @@ const STATUS: Record<ErrorCode, number> = {
   UNAUTHORIZED: 401,
   FORBIDDEN: 403,
   INVALID_REQUEST: 400,
+  INVALID_CREDENTIAL_TTL: 400,
   POLICY_DENIED: 403,
   APPROVAL_REQUIRED: 202,
   AUTHORITY_MISSING: 403,
@@ -190,6 +198,7 @@ const GENERIC_MESSAGES: Record<ErrorCode, string> = {
   UNAUTHORIZED: 'Authentication is required.',
   FORBIDDEN: 'The caller is not permitted to perform this operation.',
   INVALID_REQUEST: 'The request is invalid.',
+  INVALID_CREDENTIAL_TTL: 'A credential lifetime is required and is capped.',
   POLICY_DENIED: 'Policy denied this action.',
   APPROVAL_REQUIRED: 'Human approval is required before this action may proceed.',
   AUTHORITY_MISSING: 'No authority covers this action.',

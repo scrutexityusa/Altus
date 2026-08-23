@@ -69,7 +69,7 @@
     {
       "scenario_id": "A5",
       "title": "Isolation and enumeration",
-      "threat": "One subject or tenant reads another's policy, lease, decision, trace or receipt \u2014 or learns whether it exists.",
+      "threat": "One subject or tenant reads another's policy, lease, decision, trace or receipt — or learns whether it exists.",
       "precondition": "Two agents in one tenant, and a second tenant.",
       "attack": "Read another subject's decision, trace, receipt and lease; read the policy document as an agent; read across tenants.",
       "expected_invariant": "404, never 403. An unauthorised caller cannot distinguish 'exists' from 'does not exist' by status or response shape, so the endpoint is not an oracle. Agents cannot read the control plane at all.",
@@ -158,7 +158,7 @@
       "threat": "The money moved and the record of it did not. A retry pays twice.",
       "precondition": "A committed claim, a provider that accepted the request, and settlement that never ran.",
       "attack": "Retry the execution.",
-      "expected_invariant": "409 EXECUTION_UNRESOLVED \u2014 never REPLAY_DETECTED, which would tell the caller the work is finished. The provider is not called again, the grant stays spent, and the claim is surfaced for reconciliation under its original key. verifyExecution is the only safe external operation against this state.",
+      "expected_invariant": "409 EXECUTION_UNRESOLVED — never REPLAY_DETECTED, which would tell the caller the work is finished. The provider is not called again, the grant stays spent, and the claim is surfaced for reconciliation under its original key. verifyExecution is the only safe external operation against this state.",
       "cases": [
         "retry refused as unresolved",
         "provider not contacted",
@@ -174,7 +174,7 @@
     {
       "scenario_id": "A11",
       "title": "Transaction fault injection",
-      "threat": "A code path reaches the provider while the claim and the authority consumption are still uncommitted \u2014 the defect G-16 existed to fix.",
+      "threat": "A code path reaches the provider while the claim and the authority consumption are still uncommitted — the defect G-16 existed to fix.",
       "precondition": "A provider that can observe the database from outside the request's transaction.",
       "attack": "At the moment execute() is called, read the claim and the lease from an independent connection.",
       "expected_invariant": "No code path may reach ExecutionProvider.execute() unless the execution claim and the authority consumption are already externally observable as committed state. Asserted from inside the provider, on a connection that cannot see uncommitted work.",
@@ -185,6 +185,24 @@
       "test_target": "scripts/adversarial.ts",
       "invariant_ids": ["INV-006", "INV-010"],
       "gap": "G-16"
+    },
+    {
+      "scenario_id": "A12",
+      "title": "Omission",
+      "threat": "A control written as `if (field) { check(field) }` is not a control, because the attacker chooses whether the field is there. Two holes of exactly this shape have been found: a signature against an unenrolled signal source was ignored rather than refused, and receipt verification skipped the signature check whenever the signature was absent, so a forger deleted the signature they could not mint and the chain still reported intact.",
+      "precondition": "A request body that is known to succeed, rebuilt per case so nothing is reused, and a control assertion that it does succeed -- otherwise every corruption is refused for the wrong reason and the scenario passes vacuously.",
+      "attack": "For each security-bearing field of each request, send six corruptions: the key deleted, null, empty string, empty array, empty object, and a value of the wrong type.",
+      "expected_invariant": "Every corruption of a security-bearing field is refused. A field may be omitted only if it appears in that endpoint's `optional` list with a stated reason; that list is the complete reviewed set of what a caller is allowed to leave out.",
+      "cases": [
+        "POST /v1/authorization/evaluate -- agent, action, resource, and the bound context fields",
+        "POST /v1/execute -- decision id and every field of the presented operation",
+        "POST /v1/authority-leases -- agent, grant, actions, resources, ttl",
+        "POST /v1/signals -- source, subject, type, value, signature, key id",
+        "POST /v1/credentials -- principal, scopes, lifetime"
+      ],
+      "test_target": "scripts/adversarial.ts (omission), services/api/test/enforcement.test.ts, packages/core/test/receipts.test.ts",
+      "invariant_ids": ["INV-001", "INV-004"],
+      "gap": "-"
     }
   ]
 }

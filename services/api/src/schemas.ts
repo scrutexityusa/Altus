@@ -74,8 +74,16 @@ export const IssueCredentialSchema = z
     /** A user id, an agent id or handle, or a service name. */
     principal_id: z.string().min(1).max(128),
     scopes: z.array(z.string().min(1).max(64)).min(1).max(16),
-    /** Optional lifetime. Absent means the credential expires only on revocation. */
-    expires_in_seconds: z.number().int().min(60).max(31_536_000).optional(),
+    /**
+     * Required. A credential that never expires is not representable: the
+     * column is NOT NULL and the database caps the lifetime, so there is no
+     * shape of this request that produces an immortal token.
+     *
+     * The upper bound is 90 days. It is not a number anybody negotiated; it is
+     * short enough that rotation has to be a practised procedure rather than a
+     * plan, and long enough that it is not a weekly interruption.
+     */
+    expires_in_seconds: z.number().int().min(60).max(7_776_000),
   })
   .strict();
 

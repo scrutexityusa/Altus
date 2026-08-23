@@ -1,5 +1,25 @@
 # Cold-room transcript
 
+> **This record is not trustworthy, and it is kept for what it got wrong.**
+>
+> It reports steps 1–11 completing in 42 seconds. They could not have: step 2's
+> `pnpm altus bootstrap --json > bootstrap.json` writes pnpm's own run banner to
+> **stdout** ahead of the JSON, so the `jq -r .token bootstrap.json` on the next
+> line fails with `Invalid numeric literal` — and every step after that depends
+> on the token it did not produce. Whoever recorded this did not actually pipe
+> the bootstrap output into `jq` as the guide instructs.
+>
+> The guide is fixed (`pnpm --silent`, and the CLI's `--json` help says why).
+> The lesson is about this document rather than that bug: **a human account of a
+> run is evidence of a run, not of the guide.** `make onboarding`
+> (`scripts/onboarding-check.sh`) now executes the guide's shell as written and
+> fails on exactly this, and it is what the claim "the guide works" now rests
+> on. The stranger test — somebody with no context, on their own machine, with
+> their own stopwatch — is still outstanding.
+>
+> What is below is left unedited. The narrative of the two defects it _did_
+> catch is worth keeping; the timings are not.
+
 **A recorded run of [`onboarding.md`](onboarding.md) from a fresh clone and an
 empty database, following only what that document says.**
 

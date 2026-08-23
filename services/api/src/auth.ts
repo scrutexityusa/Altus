@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { ScrutexityError, isExpired, newId } from '@scrutexity/core';
 import type { Database, PoolClient } from './db/pool.js';
-import { securityNow } from './db/security-clock.js';
+import type { CredentialUseTracker } from './services/credential-use.js';
 
 /**
  * Bearer credentials for machine and human principals.
@@ -42,7 +42,11 @@ export function newCredentialId(): string {
 
 const UNAUTHORIZED = () => new ScrutexityError('UNAUTHORIZED', 'invalid or missing credentials');
 
-export async function authenticate(db: Database, header: string | undefined): Promise<Principal> {
+export async function authenticate(
+  db: Database,
+  header: string | undefined,
+  usage?: CredentialUseTracker,
+): Promise<Principal> {
   if (!header || !header.startsWith('Bearer ')) throw UNAUTHORIZED();
   const token = header.slice(7).trim();
   const match = TOKEN_PATTERN.exec(token);
@@ -52,23 +56,31 @@ export async function authenticate(db: Database, header: string | undefined): Pr
   // The credential row and the instant it is judged against are read on the
   // same connection, in the same transaction, so an API node's clock cannot
   // keep an expired credential alive or kill a live one.
-  const { row, now } = await db.withoutTenant(async (client: PoolClient) => {
-    const result = await client.query('SELECT * FROM scrutexity.resolve_credential($1)', [prefix]);
-    return {
-      now: await securityNow(client),
-      row: result.rows[0] as
-        | {
-            id: string;
-            organization_id: string;
-            principal_type: Principal['type'];
-            principal_id: string;
-            token_hash: Buffer;
-            scopes: string[];
-            status: 'ACTIVE' | 'REVOKED';
-            expires_at: Date | null;
-          }
-        | undefined,
-    };
+  //
+  // One statement rather than two. `now()` is transaction-stable, so joining
+  // it onto the probe yields exactly the value a separate `securityNow` call
+  // would have returned -- at one round trip instead of two, on the path every
+  // authenticated request takes. When the prefix matches nothing the query
+  // returns no rows and no instant, which costs nothing: there is no
+  // credential to judge.
+  const row = await db.withoutTenant(async (client: PoolClient) => {
+    const result = await client.query(
+      'SELECT c.*, now() AS security_now FROM scrutexity.resolve_credential($1) c',
+      [prefix],
+    );
+    return result.rows[0] as
+      | {
+          id: string;
+          organization_id: string;
+          principal_type: Principal['type'];
+          principal_id: string;
+          token_hash: Buffer;
+          scopes: string[];
+          status: 'ACTIVE' | 'REVOKED';
+          expires_at: Date | null;
+          security_now: Date;
+        }
+      | undefined;
   });
 
   // Hash the supplied token regardless of whether a row was found, so a
@@ -79,20 +91,17 @@ export async function authenticate(db: Database, header: string | undefined): Pr
 
   if (!row || !matches) throw UNAUTHORIZED();
   if (row.status !== 'ACTIVE') throw UNAUTHORIZED();
-  if (row.expires_at && isExpired(row.expires_at, now)) throw UNAUTHORIZED();
+  if (row.expires_at && isExpired(row.expires_at, row.security_now)) throw UNAUTHORIZED();
 
   // Only once every credential check above has passed. Recording a use for a
-  // credential whose secret did not verify would be untrue, and would leak that
-  // the prefix was real. Coarse (five-minute granularity) so this is not a row
-  // update in front of every request -- see migration 0010.
+  // credential whose secret did not verify would be untrue, and would leak
+  // that the prefix was real.
   //
-  // Never allowed to fail a request: an operational convenience for "is this
-  // credential still in use" must not be able to refuse an authorization.
-  await db
-    .withoutTenant((client: PoolClient) =>
-      client.query('SELECT scrutexity.touch_credential($1)', [row.id]),
-    )
-    .catch(() => undefined);
+  // Buffered rather than written: this used to be a transaction of its own in
+  // front of every authenticated request. It neither awaits nor throws -- an
+  // operational convenience for "is this credential still in use" must not be
+  // able to refuse an authorization, or to slow one down.
+  usage?.record(row.id);
 
   return {
     credential_id: row.id,

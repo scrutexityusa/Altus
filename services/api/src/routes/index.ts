@@ -86,6 +86,17 @@ export interface RouteDeps {
  */
 const DEFAULT_SIGNAL_ALGORITHMS = ['ED25519'] as const;
 
+/**
+ * Ninety days, matching `scrutexity.max_credential_lifetime()` in migration
+ * 0011 and the bound in IssueCredentialSchema.
+ *
+ * Three copies of one number is two too many, but the alternatives are worse:
+ * a runtime lookup for a constant, or a Zod schema that cannot state its own
+ * bound. The database is the one that actually enforces it; these two produce
+ * the error message.
+ */
+const MAX_CREDENTIAL_TTL_SECONDS = 7_776_000;
+
 declare module 'fastify' {
   interface FastifyRequest {
     principal: Principal;
@@ -362,17 +373,29 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
               prefix,
               hash,
               body.scopes,
-              body.expires_in_seconds
-                ? new Date(Date.now() + body.expires_in_seconds * 1000)
-                : null,
+              // Seconds, not a timestamp. The database does the addition, so
+              // an API node with a skewed clock cannot mint a credential that
+              // outlives what was asked for -- see migration 0011.
+              body.expires_in_seconds,
             ],
           );
         } catch (error) {
-          if ((error as { code?: string }).code === '23503') {
+          const code = (error as { code?: string }).code;
+          if (code === '23503') {
             throw new ScrutexityError(
               'INVALID_REQUEST',
               `no ${body.principal_type} "${body.principal_id}" exists in this organization`,
               { disclose: true },
+            );
+          }
+          if (code === '23514') {
+            // The lifetime rule, refused by the database rather than by this
+            // route. Naming the bound is not a leak: it is the same number the
+            // schema publishes, and an operator following a runbook needs it.
+            throw new ScrutexityError(
+              'INVALID_CREDENTIAL_TTL',
+              'a credential lifetime is required and may not exceed 90 days',
+              { disclose: true, details: { max_expires_in_seconds: MAX_CREDENTIAL_TTL_SECONDS } },
             );
           }
           throw error;

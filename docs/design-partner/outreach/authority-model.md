@@ -85,7 +85,7 @@ One call: `GET /v1/trace/{decision_id}`.
 ---
 
 **See it:** `make demo` — the whole flow in under ten minutes, asserted end to end.
-**Break it:** `make adversarial` (11 invariants) and `make recovery` (a real
+**Break it:** `make adversarial` (12 invariants) and `make recovery` (a real
 `SIGKILL` mid-payment).
 
 **{contact} · {repo}**

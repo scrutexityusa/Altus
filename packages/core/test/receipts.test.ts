@@ -85,6 +85,54 @@ describe('receipts', () => {
     expect(result.checks.find((c) => c.check === 'SIGNATURE')?.passed).toBe(false);
   });
 
+  it('detects a forged receipt whose signature was stripped rather than forged', () => {
+    // The attack the optional signature check used to permit. An insider with
+    // UPDATE on scrutexity.receipts cannot mint a signature -- but they never
+    // needed to. They rewrite the payload, recompute both hashes (SHA-256 is
+    // public), and delete the signature they could not produce. Structural
+    // verification passes on every check it performs; the question is whether
+    // it performs the one that matters.
+    const [receipt] = chain(1);
+    const forged = buildReceipt({
+      ...receipt!,
+      payload: { decision: 'ALLOW', amount: { currency: 'USD', amountMinor: '99900000' }, seq: 1 },
+    });
+    const stripped: Receipt = { ...forged, signature: null, signing_key_id: null };
+
+    // Everything the attacker controls is internally consistent.
+    const result = verifyReceipt(stripped, verifier);
+    expect(result.checks.find((c) => c.check === 'PAYLOAD_HASH')?.passed).toBe(true);
+    expect(result.checks.find((c) => c.check === 'LINK_HASH')?.passed).toBe(true);
+
+    // And it is still not intact.
+    expect(result.intact).toBe(false);
+    expect(result.checks.find((c) => c.check === 'SIGNATURE')?.passed).toBe(false);
+  });
+
+  it('detects a rewritten and re-linked tail with the signatures dropped', () => {
+    const receipts = chain(4);
+    // Rewrite receipt 2 and re-link 3 and 4 behind it, unsigned throughout.
+    const rebuilt: Receipt[] = [receipts[0]!];
+    let previous = receipts[0]!.hash;
+    for (const original of receipts.slice(1)) {
+      const forged = buildReceipt({
+        ...original,
+        payload:
+          original.seq === 2
+            ? { decision: 'ALLOW', amount: { currency: 'USD', amountMinor: '99900000' }, seq: 2 }
+            : original.payload,
+        previous_hash: previous,
+      });
+      rebuilt.push({ ...forged, signature: null, signing_key_id: null });
+      previous = forged.hash;
+    }
+
+    const result = verifyChain(rebuilt, verifier);
+    expect(result.intact).toBe(false);
+    // Caught at the first unsigned receipt, not merely at the end.
+    expect(result.broken_at?.seq).toBe(2);
+  });
+
   it('refuses to call a signed receipt intact without a key to check it against', () => {
     const [receipt] = chain(1);
     expect(verifyReceipt(receipt!).intact).toBe(false);

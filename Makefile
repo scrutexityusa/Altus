@@ -79,7 +79,7 @@ demo: build ## Run the full treasury demo from a clean database
 	pnpm exec tsx scripts/demo.ts
 
 .PHONY: adversarial
-adversarial: build ## Run the adversarial conformance suite (11 security invariants)
+adversarial: build ## Run the adversarial conformance suite (12 security invariants)
 	# Not an alias for a subset of the unit tests. Each scenario mounts a real
 	# attack through the public API against a real database, and reports
 	# whether the invariant held, whether the provider was contacted, and what
@@ -102,7 +102,10 @@ test: ## Run every test
 
 .PHONY: test-unit
 test-unit: ## Run the pure-domain tests (no database required)
-	pnpm exec vitest run packages
+	# Its own configuration, with no globalSetup, so "no database required" is
+	# enforced rather than described. CI's first job runs exactly this line in a
+	# container with no PostgreSQL.
+	pnpm exec vitest run --config vitest.unit.config.ts
 
 .PHONY: typecheck
 typecheck: ## Typecheck every package, sources and tests
@@ -122,6 +125,20 @@ lint: ## Check formatting, types and contract drift
 	pnpm exec tsx scripts/generate-specs.ts --check
 	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
+.PHONY: onboarding
+onboarding: ## Run docs/design-partner/onboarding.md exactly as a partner would
+	# The suite exercises the endpoints through an in-process harness, which is
+	# why it never noticed that the guide's step 2 produced a file jq refused to
+	# parse. This runs the shell a partner copies.
+	scripts/onboarding-check.sh
+
+.PHONY: bench
+bench: ## Measure decision and enforcement latency against a real database
+	# Deliberately not part of `make ci`: the numbers depend on the machine, so
+	# a CI threshold would either be so loose it proves nothing or so tight it
+	# fails on a noisy runner. Run it, read it, and put the numbers in a doc.
+	pnpm exec tsx scripts/bench.ts
+
 .PHONY: spec
 spec: ## Regenerate the OpenAPI and policy schema from the code
 	pnpm exec tsx scripts/generate-specs.ts
@@ -133,4 +150,4 @@ keys: ## Generate a development receipt signing key
 	@echo "(development only; production keys come from a secret manager)"
 
 .PHONY: ci
-ci: install lint test build demo adversarial recovery ## Everything CI runs
+ci: install lint test build demo adversarial recovery onboarding ## Everything CI runs

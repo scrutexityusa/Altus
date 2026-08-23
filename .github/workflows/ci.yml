@@ -40,7 +40,11 @@ jobs:
         # Drift here changes the bytes of every hash the system has issued.
         run: pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
       - name: Unit and invariant tests
-        run: pnpm exec vitest run packages
+        # vitest.unit.config.ts deliberately has no globalSetup. The single
+        # shared configuration provisioned a database unconditionally, so this
+        # step failed on connect in a job that has no PostgreSQL service -- and
+        # because every other job `needs: core`, nothing downstream ever ran.
+        run: pnpm exec vitest run --config vitest.unit.config.ts
 
   integration:
     name: Integration, security and demo
@@ -103,6 +107,25 @@ jobs:
       # scene, so "the demo still works" is a build result, not a claim.
       - name: Treasury demo, from a clean database
         run: NO_COLOR=1 pnpm exec tsx scripts/demo.ts
+
+      # The three suites below were in `make ci` and not here, so the local
+      # gate was stronger than the remote one -- and these are the security
+      # suites, which is the worst place for that gap. They invoke the Make
+      # targets rather than restating the commands, so the two definitions
+      # cannot drift again.
+      #
+      # `build` has already run above, so each is just the script.
+      - name: Adversarial conformance suite
+        run: NO_COLOR=1 make adversarial
+
+      - name: Recovery under SIGKILL
+        run: NO_COLOR=1 make recovery
+
+      # Runs the onboarding guide's own shell -- curl, jq, a real server on a
+      # real port. The in-process test harness cannot see a defect that lives
+      # in the commands a partner copies, and one did.
+      - name: Onboarding guide, run as written
+        run: make onboarding
 
   build:
     name: Container image
