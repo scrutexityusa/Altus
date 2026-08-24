@@ -93,6 +93,21 @@ Four things enforce it rather than describe it:
    enforced by the configuration the no-database job actually uses, rather than
    asserted in a job name.
 
+Two of those needed correcting within the hour, which is worth recording
+rather than quietly fixing:
+
+- `ci-status` reported **green for the previous commit**. "The latest run on
+  this branch is green" and "your commit is green" are different claims, and
+  the gap between them is minutes wide on every push. It now compares the run's
+  SHA against local `HEAD` and refuses rather than answering a question nobody
+  asked.
+- The workflow fired on `pull_request` and on pushes to `main` only. When this
+  branch's pull request merged, pushes to it stopped triggering anything at
+  all — so the branch became unverifiable at exactly the moment the tooling for
+  verifying it was written. `push` now covers every branch. PR'd branches run
+  twice as a result, which buys coverage of both the branch head and the merge
+  result.
+
 And, for the class the migration defect belongs to:
 
 5. **Migration replay is tested against data, not against emptiness.**

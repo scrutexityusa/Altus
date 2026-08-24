@@ -79,4 +79,23 @@ if [ "$conclusion" != success ]; then
   exit 1
 fi
 
-echo "  GREEN. cite this URL rather than a local run."
+# "The latest run on this branch is green" and "your commit is green" are
+# different claims, and the gap between them is minutes wide every time you
+# push. This script reported success for the previous commit within a minute of
+# being written, which is the same mistake it exists to prevent, one scope
+# smaller: a true statement about a thing nobody was asking about.
+#
+# Local HEAD may legitimately be absent -- a shallow CI checkout, a detached
+# state -- in which case there is nothing to compare and the run stands on its
+# own.
+if head=$(git rev-parse HEAD 2>/dev/null); then
+  if [ "${head:0:8}" != "$sha" ]; then
+    printf '  local HEAD  %s\n\n' "${head:0:8}"
+    echo "  NOT YOUR COMMIT. The green run above is for ${sha}; you are on ${head:0:8}." >&2
+    echo "  Push, wait for the run, and ask again. A green run for an earlier" >&2
+    echo "  commit says nothing about the one in front of you." >&2
+    exit 1
+  fi
+fi
+
+echo "  GREEN for this exact commit. cite this URL rather than a local run."
