@@ -339,7 +339,9 @@ describe('credentials', () => {
 describe('policy activation through the API', () => {
   // `POST /v1/policy-versions/{id}/reviews` was published in the OpenAPI
   // contract, required for any partner to activate their first policy, and had
-  // never been executed by anything: the seed writes reviews with direct SQL.
+  // never been executed by anything: the seed wrote reviews with direct SQL,
+  // so no test had ever called the published route. It does now, and
+  // scripts/check-public-path.sh keeps it that way.
   // It was broken -- a parameter used as both an enum and a text literal in one
   // statement, failing with 42P08. Nothing could have caught that except
   // walking the flow, so the flow is now walked on every CI run.
