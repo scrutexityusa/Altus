@@ -69,14 +69,23 @@ While running, in their own words:
 Afterwards, five questions, before any discussion:
 
 1. In one sentence, what does this system do?
-2. Who or what is stopped by it, and from doing what?
-3. Why does activating a policy need three people? Does that seem right to you?
-4. What would you have to change to point this at your own bank accounts?
-5. What did you not trust?
+2. **What exactly prevented that execution from exceeding its authority?**
+3. **Why did the policy need two reviewers who did not write it?**
+4. Who or what is stopped by it, and from doing what?
+5. What would you have to change to point this at your own bank accounts?
+6. What did you not trust?
 
-Question 1 is the important one. If the answer is "it logs what agents do" or
-"it's an approval workflow", the positioning has failed regardless of how
-smoothly the commands ran.
+Questions 1, 2 and 3 are the ones that can fail. A stranger who runs all eleven
+steps cleanly and cannot answer them has produced an **onboarding success and a
+comprehension failure**, which is the more expensive result and the easier one
+to miss — the commands worked, so the run looks like a pass.
+
+Answers to watch for on question 1: "it logs what agents do" or "it's an
+approval workflow" means the positioning has failed regardless of how smoothly
+it ran. On question 2, "the policy said no" is not the answer — the execution
+in step 9 was _allowed_; what bounded it was a lease, a ceiling, and a hash
+comparison at the boundary. If none of that surfaced, the guide showed them a
+sequence rather than a mechanism.
 
 ## How to read the result
 
