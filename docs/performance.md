@@ -12,11 +12,11 @@ that command.
 
 | path                                          |      p50 |      p95 |      p99 |      max |
 | --------------------------------------------- | -------: | -------: | -------: | -------: |
-| `decide` — the pure decision function         |  0.16 ms |  0.25 ms |  1.16 ms |  3.73 ms |
-| `POST /v1/authorization/evaluate` → ALLOW     | 11.06 ms | 14.95 ms | 18.39 ms | 26.01 ms |
-| `POST /v1/authorization/evaluate` → ESCALATE  | 10.78 ms | 13.00 ms | 14.71 ms | 67.91 ms |
-| `POST /v1/authorization/evaluate` → DENY      | 10.06 ms | 13.01 ms | 14.63 ms | 50.00 ms |
-| `POST /v1/execute` — the enforcement boundary |  8.81 ms | 11.68 ms | 14.75 ms | 18.44 ms |
+| `decide` — the pure decision function         |  0.17 ms |  0.27 ms |  1.35 ms |  4.26 ms |
+| `POST /v1/authorization/evaluate` → ALLOW     | 10.44 ms | 13.20 ms | 15.39 ms | 43.90 ms |
+| `POST /v1/authorization/evaluate` → ESCALATE  | 10.55 ms | 13.67 ms | 15.22 ms | 51.93 ms |
+| `POST /v1/authorization/evaluate` → DENY      |  9.76 ms | 12.56 ms | 15.36 ms | 24.42 ms |
+| `POST /v1/execute` — the enforcement boundary |  8.80 ms | 11.46 ms | 13.06 ms | 14.44 ms |
 
 Sequential, one client, real HTTP over loopback, real PostgreSQL 16. 400
 samples each after 60 warmup iterations; 20,000 samples for the pure function.
@@ -25,6 +25,12 @@ reports a latency no request actually experienced, which is the wrong kind of
 number to hand somebody deciding whether to put this in their payment path.
 
 Run-to-run variance across four runs was roughly ±10% at p50 and ±25% at p99.
+
+Both tables are post-optimization. They disagreed with the prose below for
+three commits: an edit meant to update them silently matched nothing, because
+the formatter had already re-padded the table columns, and nobody re-read the
+file. The prose was right and the tables were stale — a document asserting an
+improvement above numbers that did not show it.
 
 ## What the numbers say
 
@@ -64,8 +70,8 @@ number stops being ours.
 
 | load                                    |      p50 |       p95 |       p99 | sustained |
 | --------------------------------------- | -------: | --------: | --------: | --------: |
-| 16 concurrent, one tenant               | 73.93 ms | 136.33 ms | 164.49 ms | 201 req/s |
-| 16 concurrent, split across two tenants | 61.06 ms |  88.45 ms | 146.14 ms | 247 req/s |
+| 16 concurrent, one tenant               | 70.54 ms | 130.33 ms | 168.07 ms | 201 req/s |
+| 16 concurrent, split across two tenants | 61.51 ms |  71.69 ms |  78.50 ms | 258 req/s |
 
 The same offered load, split over two tenants instead of one, raises
 throughput ~20% and cuts tail latency. That difference has a specific cause.
