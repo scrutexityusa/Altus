@@ -1,8 +1,15 @@
 name: CI
 
 on:
+  # Every branch, not just main. A branch whose pull request has been merged or
+  # closed stops firing `pull_request`, so work pushed to it afterwards was
+  # verified nowhere at all -- which is ADR-0020's failure one scope smaller,
+  # and it silently disarms `make ci-status`.
+  #
+  # PR'd branches therefore run twice, once per trigger. That is the price of
+  # covering both the branch head and the merge result, and the concurrency
+  # group below cancels superseded runs within each.
   push:
-    branches: [main]
   pull_request:
 
 concurrency:

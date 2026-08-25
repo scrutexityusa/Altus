@@ -1,5 +1,7 @@
 # Scrutexity
 
+[![CI](https://github.com/scrutexityusa/Altus/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/scrutexityusa/Altus/actions/workflows/ci.yml?query=branch%3Amain)
+
 **Runtime authorization for high-consequence agent actions.**
 
 Scrutexity answers one question, deterministically, and produces verifiable
@@ -48,7 +50,8 @@ build.
 ```bash
 make api          # the control plane, with reload
 make web          # the dashboard
-make test         # 609 tests
+make ci-status    # is the REMOTE pipeline green? cite its URL, not this machine
+make test         # 611 tests
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the API mid-payment; assert what survived
 make ci           # everything above
@@ -206,9 +209,16 @@ about that operation, and the evidence says so.
 
 ## Testing
 
-609 tests across 22 files, plus two suites that are not tests of units at all.
-`./scripts/ci-verify.sh` runs exactly what CI runs, from a tree with no build
-output and no dependencies installed.
+611 tests across 23 files, plus three suites that are not tests of units at all:
+`make adversarial` (12 security invariants mounted as real attacks),
+`make recovery` (the API destroyed with SIGKILL mid-payment), and
+`make onboarding` (the partner guide executed as written).
+
+**Green means the remote run is green.** `make ci` proves the suite passes on
+your machine and nothing more; `make ci-status` asks GitHub Actions about the
+current branch and prints the run URL to cite. The two disagreed for the first
+fourteen runs of this repository — see
+[ADR-0020](docs/decisions/0020-verify-where-it-is-authoritative.md).
 
 The ones that matter most are the invariants:
 

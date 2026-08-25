@@ -74,7 +74,7 @@ fixed, regression-tested, operationally verified.
 ## Verify it yourself
 
 ```
-make ci           # 609 tests, lint, build, demo
+make ci           # 611 tests, lint, build, demo
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the process mid-payment; assert what survived
 ```

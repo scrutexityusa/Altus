@@ -125,6 +125,13 @@ lint: ## Check formatting, types and contract drift
 	pnpm exec tsx scripts/generate-specs.ts --check
 	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
 
+.PHONY: ci-status
+ci-status: ## Ask GitHub Actions whether this branch is actually green
+	# `make ci` says the suite passes HERE. This says whether it passed where
+	# it counts, and prints the run URL to cite instead of the word "green".
+	# The two disagreed for the first fourteen runs of this repository.
+	scripts/ci-status.sh
+
 .PHONY: onboarding
 onboarding: ## Run docs/design-partner/onboarding.md exactly as a partner would
 	# The suite exercises the endpoints through an in-process harness, which is
