@@ -19,6 +19,12 @@
 >
 > What is below is left unedited. The narrative of the two defects it _did_
 > catch is worth keeping; the timings are not.
+>
+> **The rule that came out of this: no onboarding timing claim anywhere — not
+> 42 seconds, not "about 30 minutes", not "under five minutes" — until a
+> stranger produces one.** A product selling verifiable claims cannot afford to
+> quote an unverifiable number, and the guide's own header now says so instead
+> of estimating.
 
 **A recorded run of [`onboarding.md`](onboarding.md) from a fresh clone and an
 empty database, following only what that document says.**

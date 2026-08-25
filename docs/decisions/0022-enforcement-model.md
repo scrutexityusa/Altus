@@ -123,6 +123,22 @@ The third row is the one that matters architecturally. In Mode A, Altus down
 means payments stop. In Mode B it does not, and that is a better answer than any
 cache or replica.
 
+## The rule underneath all three
+
+**A decision is not automatically an execution capability.**
+
+That gap is the whole product. Mode A bridges it by standing in the path; Mode B
+bridges it by turning a narrowly bound grant into something the provider can
+verify. A system that closes the gap by _assuming_ it — that answers "yes, this
+was allowed" after the money has already moved — is an audit log with opinions,
+and it is what Altus becomes if the binding ever stops being enforced at the
+moment of execution.
+
+The corollary is the sentence worth defending: **the exact thing being executed
+must be cryptographically bound to the authority that permitted it.** The hard
+part of that already exists in `ExecutionGrantBinding`. What changes between
+modes is only who checks it.
+
 ## Decision
 
 1. **Mode A is the reference implementation and the design-partner wedge.** It

@@ -1,7 +1,14 @@
 # Onboarding: your tenant, from an empty database
 
-**Time: about 30 minutes. No source edits, no database client, no fixture
+**Reproducible clean-install workflow, verified in CI on every push. Independent
+timing not yet established. No source edits, no database client, no fixture
 credentials.**
+
+There is deliberately no number here. Every timing this guide has carried was
+measured by somebody who had already seen the system, and one of those runs is
+now known to be impossible as recorded. `make onboarding` executes these
+commands as written on a clean runner; how long they take a stranger is a fact
+nobody has yet collected.
 
 Every block below is copy-pasteable **in sequence**. Each one exports what the
 next one needs, so nothing has to be reconstructed from earlier output. When you

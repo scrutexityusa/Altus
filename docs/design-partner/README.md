@@ -36,6 +36,7 @@ own opinion. That is the intent — the system's own proof is the pitch.
 
 - **621 tests**, 12/12 adversarial invariants, 3/3 recovery scenarios.
 - **[stranger-test.md](stranger-test.md)** — the one claim automation cannot make, and the protocol for making it.
+- **[provider-discovery.md](provider-discovery.md)** — eight questions for the first provider conversation, and what each answer decides.
 - **Production key custody is implemented and has never been exercised.**
   `SECRET_PROVIDER=agent` takes the signing key from a tmpfs written by your own
   secrets agent — CSI driver, External Secrets Operator, Vault Agent — so Altus

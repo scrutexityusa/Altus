@@ -77,7 +77,12 @@ does less.
   partner's work.
 
   Worth being exact about what stops a payment today: **our position, not
-  cryptography.** Altus performs the operation and refuses anything that does
+  cryptography.** In orchestrated mode Altus sits in the execution path. In
+  attested mode — designed, not built — Altus never holds your funds or bank
+  credentials, and your provider verifies a bounded authorization artifact
+  against a public key you trust. **We can enforce the action without custody of
+  the money** is the position; today only the first half is true.
+  Altus performs the operation and refuses anything that does
   not match what it authorized, which is enforcement as long as it is the only
   route to the provider. The direction that removes the qualifier is a signed
   attestation the provider itself verifies — so that going around us fails at
