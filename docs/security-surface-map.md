@@ -9,7 +9,7 @@ authority, what it persists, how it fails, and which test proves the claim. A
 control with no test is listed as a gap, not as a control.
 
 **Status at audit time:** 428 tests, 14 files, clean CI.
-**Current:** 611 tests across 23 files; 12/12 adversarial invariants; 3/3 recovery scenarios.
+**Current:** 621 tests across 24 files; 12/12 adversarial invariants; 3/3 recovery scenarios.
 
 ## How to read a gap's status
 
@@ -233,17 +233,29 @@ no production deployment, so no fix has been operationally verified by anyone.
 
 ### The one gap that gates production
 
-**No key manager is wired.** Production requires `SECRET_PROVIDER=kms`, and
-`KmsSecretProvider` throws on every read because nothing is connected behind it.
-The process therefore refuses to start rather than falling back to local key
-custody — the correct failure, and the reason this is not filed as a defect.
+**Production key custody is available, and has never been exercised.**
+`SECRET_PROVIDER=agent` reads the signing key from a tmpfs projection written by
+a secrets agent — the Secrets Store CSI driver, External Secrets Operator, Vault
+Agent — which is how AWS, GCP, Azure and Vault are actually consumed by a
+container. It adds no cloud SDK, and it is checked rather than declared: the
+mount must be tmpfs or ramfs and the file must not be readable beyond its owner,
+or the process refuses the key. See `docs/key-management.md` and
+`deploy/k8s/secretproviderclass.example.yaml`.
 
-It does mean, stated without hedging: **no deployment of this code has ever
-started in a production posture.** Every "Fixed" and "Regression-tested" above is
+`SECRET_PROVIDER=kms` remains a shape with nothing behind it and throws on every
+read. It stays because envelope encryption or signing inside an HSM is a
+stronger posture than `agent` and is worth building when a partner asks, not
+before.
+
+What has not happened is the part that matters: **no deployment of this code has
+ever started in a production posture.** The custody path is implemented and
+unit-tested — including that it refuses a persistent mount and a
+world-readable key — and it has never held a real key issued by a real manager
+in a real cluster. Every "Fixed" and "Regression-tested" above is
 established against development and test configurations. Nothing in the
 Operationally verified column can change until a design partner's infrastructure
-says which key manager, and the integration seam is defined in
-`docs/design-partner/integration-runbook.md` §2 rather than guessed at here.
+runs it. The seam is no longer a guess, though: it is a `SecretProviderClass`
+and two environment variables.
 
 Tracked as a deployment prerequisite, not a gap number, because there is no
 defect to fix — there is a decision only a partner can make.

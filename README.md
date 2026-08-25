@@ -51,7 +51,7 @@ build.
 make api          # the control plane, with reload
 make web          # the dashboard
 make ci-status    # is the REMOTE pipeline green? cite its URL, not this machine
-make test         # 611 tests
+make test         # 621 tests
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the API mid-payment; assert what survived
 make ci           # everything above
@@ -209,7 +209,7 @@ about that operation, and the evidence says so.
 
 ## Testing
 
-611 tests across 23 files, plus three suites that are not tests of units at all:
+621 tests across 24 files, plus three suites that are not tests of units at all:
 `make adversarial` (12 security invariants mounted as real attacks),
 `make recovery` (the API destroyed with SIGKILL mid-payment), and
 `make onboarding` (the partner guide executed as written).
@@ -259,18 +259,19 @@ receipts, tampered policy, and hostile signal input.
 
 ## Documentation
 
-| Document                                              | What it covers                                             |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| [architecture.md](docs/architecture.md)               | Shape of the system, and what was deliberately left out    |
-| [domain-model.md](docs/domain-model.md)               | Entities, relationships, state machines, exact money       |
-| [authorization-model.md](docs/authorization-model.md) | The decision function, in evaluation order                 |
-| [data-model.md](docs/data-model.md)                   | Schema choices, constraints as invariants, index rationale |
-| [security-model.md](docs/security-model.md)           | Controls, and the threats accepted                         |
-| [threat-model.md](docs/threat-model.md)               | Attacks by attacker, each mapped to a test                 |
-| [api-contract.md](docs/api-contract.md)               | Conventions the OpenAPI spec cannot express                |
-| [sequence-diagrams.md](docs/sequence-diagrams.md)     | The flows, in Mermaid                                      |
-| [sprint-plan.md](docs/sprint-plan.md)                 | What shipped, and what is left                             |
-| [decisions/](docs/decisions/)                         | Ten ADRs, each with what would make us revisit it          |
+| Document                                              | What it covers                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------------- |
+| [architecture.md](docs/architecture.md)               | Shape of the system, and what was deliberately left out             |
+| [domain-model.md](docs/domain-model.md)               | Entities, relationships, state machines, exact money                |
+| [authorization-model.md](docs/authorization-model.md) | The decision function, in evaluation order                          |
+| [data-model.md](docs/data-model.md)                   | Schema choices, constraints as invariants, index rationale          |
+| [security-model.md](docs/security-model.md)           | Controls, and the threats accepted                                  |
+| [key-management.md](docs/key-management.md)           | Where the signing key may live, and how production refuses the rest |
+| [threat-model.md](docs/threat-model.md)               | Attacks by attacker, each mapped to a test                          |
+| [api-contract.md](docs/api-contract.md)               | Conventions the OpenAPI spec cannot express                         |
+| [sequence-diagrams.md](docs/sequence-diagrams.md)     | The flows, in Mermaid                                               |
+| [sprint-plan.md](docs/sprint-plan.md)                 | What shipped, and what is left                                      |
+| [decisions/](docs/decisions/)                         | Ten ADRs, each with what would make us revisit it                   |
 
 ## What is not built
 

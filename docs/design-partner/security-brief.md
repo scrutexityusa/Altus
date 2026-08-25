@@ -184,7 +184,7 @@ These are the honest gaps as of this release. None is hidden behind a flag.
 ## Verify it yourself
 
 ```
-make ci           # 611 tests, lint, build, demo
+make ci           # 621 tests, lint, build, demo
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the process mid-payment; assert what survived
 ```

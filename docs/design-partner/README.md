@@ -34,12 +34,16 @@ own opinion. That is the intent — the system's own proof is the pitch.
 
 ## Honest state, in one place
 
-- **611 tests**, 12/12 adversarial invariants, 3/3 recovery scenarios.
+- **621 tests**, 12/12 adversarial invariants, 3/3 recovery scenarios.
 - **[stranger-test.md](stranger-test.md)** — the one claim automation cannot make, and the protocol for making it.
-- **No key manager is wired.** Production requires one and refuses to start
-  without it, so **no deployment has run in a production posture.** Wiring a
-  partner's chosen manager is scoped week-one work
-  ([runbook §2](integration-runbook.md)).
+- **Production key custody is implemented and has never been exercised.**
+  `SECRET_PROVIDER=agent` takes the signing key from a tmpfs written by your own
+  secrets agent — CSI driver, External Secrets Operator, Vault Agent — so Altus
+  holds no cloud credential and links no cloud SDK
+  ([key-management.md](../key-management.md)). It is unit-tested, including that
+  it refuses a persistent mount and a world-readable key. **No deployment has
+  run in a production posture**, so day one is your `SecretProviderClass` and
+  two environment variables ([runbook §2](integration-runbook.md)).
 - **No egress detection, no workload-bound identity, no rate limiting.** All in
   the gap register with a status.
 - Every known gap: [`../security-surface-map.md`](../security-surface-map.md).
