@@ -982,3 +982,77 @@ async function insertDecisionCopy(sourceId: string, nulled: readonly string[]): 
   });
   return forgedId;
 }
+
+describe('the evidence names who invoked the boundary', () => {
+  // `agent_id` answers "whose authority was spent". Until now nothing answered
+  // "who spent it". Those coincide when an agent executes under its own
+  // credential and part company the moment an operator does it on the agent's
+  // behalf -- which this route has always permitted. The second case is the
+  // one where the evidence used to lose the acting party entirely.
+
+  async function claimRow(decisionId: string) {
+    let row: Record<string, unknown> = {};
+    await asOwner(async (client) => {
+      const result = await client.query(
+        `SELECT agent_id, invoked_by_type, invoked_by_id
+           FROM scrutexity.execution_claims WHERE decision_id = $1`,
+        [decisionId],
+      );
+      row = result.rows[0] as Record<string, unknown>;
+    });
+    return row;
+  }
+
+  it('records the agent as invoker when the agent executes under its own credential', async () => {
+    const { decision, operation } = await authorisedWire('invoker-agent');
+    const result = await execute(h.tenant.tokens['treasury_agent']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.status).toBe(201);
+
+    const row = await claimRow(decision.decision_id);
+    expect(row.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(row.invoked_by_type).toBe('agent');
+    expect(row.invoked_by_id).toBe(h.tenant.agents['treasury_agent']);
+  });
+
+  it('distinguishes the operator who executed from the agent whose authority was spent', async () => {
+    const { decision, operation } = await authorisedWire('invoker-operator');
+    // A human principal, executing a decision that belongs to an agent. The
+    // route infers the agent from the decision; it must not infer the invoker.
+    const result = await execute(h.tenant.tokens['admin']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.status, JSON.stringify(result.body)).toBe(201);
+
+    const row = await claimRow(decision.decision_id);
+    expect(row.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(row.invoked_by_type).toBe('user');
+    expect(row.invoked_by_id).toBe(h.tenant.users['admin']);
+    // The whole point: the two are different, and both survived.
+    expect(row.invoked_by_id).not.toBe(row.agent_id);
+  });
+
+  it('carries the invoker in the receipt, not only in the claim row', async () => {
+    // A verifier holds the receipt and not the database. If attribution lives
+    // only in a table, the artifact still cannot name who acted.
+    const { decision, operation } = await authorisedWire('invoker-receipt');
+    const result = await execute(h.tenant.tokens['admin']!, {
+      decision_id: decision.decision_id,
+      operation,
+    });
+    expect(result.status).toBe(201);
+
+    const receipt = await h.call(
+      'GET',
+      `/v1/receipts/${result.body.receipt_id}`,
+      h.tenant.tokens['admin']!,
+    );
+    const payload = receipt.body.receipt.payload;
+    expect(payload.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(payload.invoked_by_type).toBe('user');
+    expect(payload.invoked_by_id).toBe(h.tenant.users['admin']);
+  });
+});

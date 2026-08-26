@@ -1034,6 +1034,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         organizationId: request.principal.organization_id,
         decisionId: body.decision_id,
         agentId,
+        // `agentId` above may be inferred from the decision; this never is.
+        // The two differ exactly when somebody executes on an agent's behalf,
+        // which is the case the evidence used to lose.
+        invokedBy: { type: request.principal.type, id: request.principal.id },
         presentedOperation: body.operation,
       });
     });
@@ -1071,7 +1075,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
         const result = await client.query(
           `SELECT c.id, c.decision_id, c.agent_id, c.state, c.provider,
                   c.idempotency_key, c.external_reference, c.last_error,
-                  c.claimed_at, c.resolved_at
+                  c.claimed_at, c.resolved_at, c.invoked_by_type, c.invoked_by_id
              FROM scrutexity.execution_claims c
             WHERE c.state IN ('EXECUTING', 'UNKNOWN')
               AND c.claimed_at < now() - make_interval(secs => $1)
@@ -1084,6 +1088,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps): Pro
             claim_id: row.id,
             decision_id: row.decision_id,
             agent_id: row.agent_id,
+            // Whoever is reconciling a stuck payment needs to reach the party
+            // that started it, which is not always the agent it ran as.
+            invoked_by_type: row.invoked_by_type,
+            invoked_by_id: row.invoked_by_id,
             state: row.state,
             provider: row.provider,
             // The key the provider was called under. A reconciliation job asks

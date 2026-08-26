@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -32,6 +33,23 @@ import { ADMIN_URL } from './harness.js';
  */
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
+
+/**
+ * How far back to roll to undo 0010, whatever the newest migration is.
+ *
+ * This was `--down 3` when 0012 was the head. Adding 0013 moved the window off
+ * 0010 without failing anything: the round trip still passed, and quietly
+ * stopped exercising the one-way door it exists to catch. A test that silently
+ * narrows is worse than one that breaks, so the depth is derived.
+ */
+export function rollbackDepthToUndo(target: number): number {
+  const numbers = readdirSync(new URL('../../../db/migrations/', import.meta.url))
+    .filter((name) => name.endsWith('.sql') && !name.endsWith('.down.sql'))
+    .map((name) => Number(name.slice(0, 4)))
+    .filter((n) => Number.isInteger(n));
+  const head = Math.max(...numbers);
+  return head - target + 1;
+}
 
 function withDatabase(base: string, database: string): string {
   const url = new URL(base);
@@ -113,11 +131,13 @@ describe('migrations roll forward over data that already exists', () => {
       );
     });
 
-    // The same round trip CI performs -- 0012, 0011, 0010 down, then all three
+    // The same round trip CI performs: back far enough to undo 0010, then
     // forward again. Before the backfill this threw
     // `api_credentials_revoked_shape is violated by some row`.
+    const depth = rollbackDepthToUndo(10);
+    expect(depth).toBeGreaterThanOrEqual(1);
     expect(() => {
-      migrate('--down', '3');
+      migrate('--down', String(depth));
       migrate();
     }).not.toThrow();
 

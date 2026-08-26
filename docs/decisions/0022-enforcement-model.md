@@ -139,6 +139,33 @@ must be cryptographically bound to the authority that permitted it.** The hard
 part of that already exists in `ExecutionGrantBinding`. What changes between
 modes is only who checks it.
 
+## Two parties, and the vocabulary the schema uses
+
+"Who is trusted to enforce it" turns out to be two questions that were being
+answered as one:
+
+- **Whose authority is spent.** The agent holding the lease. `agent_id`.
+- **Who invoked the boundary.** The principal that called `/v1/execute`.
+  `invoked_by_type` and `invoked_by_id`.
+
+They coincide when an agent executes under its own credential, which made it
+easy to record only the first. They part company the moment an operator or an
+orchestrating service executes on the agent's behalf — which Mode A has always
+permitted, because standing in the path does not mean being the only caller.
+Recording only the agent produced a receipt naming a party that did not act.
+
+The enforcement model therefore takes a position: **an execution has exactly
+one invoker, and the boundary never infers it.** The agent may be resolved from
+the decision; the invoker is read from the authenticated principal and from
+nowhere else. In Mode B this survives unchanged — the attestation a provider
+verifies should name both parties, because "the bank asked who authorised this"
+and "the bank asked who submitted it" are different questions, and a provider
+that can only answer the first has an attribution gap of its own.
+
+Rows written before this distinction existed record `unrecorded`, which is
+neither party. Backfilling them to the agent would have asserted the one thing
+that was never established.
+
 ## Decision
 
 1. **Mode A is the reference implementation and the design-partner wedge.** It

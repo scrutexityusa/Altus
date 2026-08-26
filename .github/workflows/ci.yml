@@ -94,8 +94,15 @@ jobs:
         # A migration without a working down migration is a one-way door.
         # Proving the round trip here means nobody discovers that during an
         # incident.
+        # The depth is derived, not pinned: `--down 3` reached 0010 when 0012
+        # was the head, and adding a migration moved the window off it without
+        # failing anything.
         run: |
-          pnpm exec tsx scripts/migrate.ts --down 3
+          HEAD_MIGRATION=$(ls db/migrations/[0-9][0-9][0-9][0-9]_*.sql \
+            | grep -v '\.down\.sql$' | sed 's|.*/||' | cut -c1-4 | sort -n | tail -1)
+          DEPTH=$((10#$HEAD_MIGRATION - 10 + 1))
+          echo "rolling back $DEPTH migrations to undo 0010"
+          pnpm exec tsx scripts/migrate.ts --down "$DEPTH"
           pnpm exec tsx scripts/migrate.ts
 
       # No build step here on purpose: vitest aliases the workspace packages to

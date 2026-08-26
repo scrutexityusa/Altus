@@ -105,10 +105,26 @@ import type { ExecutionProvider, ProviderOutcome, ProviderRegistry } from './pro
  */
 const PROVIDER_TIMEOUT_MS = 30_000;
 
+/**
+ * Who invoked the boundary, as distinct from whose authority it spends.
+ *
+ * `agentId` answers "whose authority was consumed". This answers "who asked".
+ * They coincide when an agent calls `/v1/execute` with its own credential and
+ * diverge the moment an operator or an orchestrating service does it on the
+ * agent's behalf -- which the route has always allowed. Recording only the
+ * first leaves an auditor unable to name the party that acted.
+ */
+export interface ExecutionInvoker {
+  type: 'user' | 'agent' | 'service';
+  id: string;
+}
+
 export interface EnforceExecutionInput {
   organizationId: string;
   decisionId: string;
   agentId: string;
+  /** The principal that called the boundary. Never inferred from the decision. */
+  invokedBy: ExecutionInvoker;
   /** What the caller believes it is about to execute. A claim, not an input. */
   presentedOperation: {
     action: string;
@@ -202,6 +218,7 @@ export async function enforceExecution(
       operation: prepared.operation,
       executedIntentHash: prepared.executedIntentHash,
       outcome,
+      invokedBy: input.invokedBy,
     }),
   );
 }
@@ -453,6 +470,7 @@ async function prepare(
     idempotencyKey: idempotencyKeyFor(decision.id),
     exactIntentHash: decision.exact_intent_hash,
     bindingHash: decision.binding_hash,
+    invokedBy: input.invokedBy,
   });
   // Somebody else got here first and already finished. Hand back what they
   // got; the grant is spent and the money has moved exactly once.
@@ -615,6 +633,7 @@ async function claimExecution(
     idempotencyKey: string;
     exactIntentHash: string;
     bindingHash: string;
+    invokedBy: ExecutionInvoker;
   },
 ): Promise<
   { kind: 'claimed'; claimId: string } | { kind: 'settled'; result: EnforceExecutionResult }
@@ -630,8 +649,8 @@ async function claimExecution(
     await client.query(
       `INSERT INTO scrutexity.execution_claims
          (id, organization_id, decision_id, agent_id, state, provider, idempotency_key,
-          exact_intent_hash, binding_hash)
-       VALUES ($1,$2,$3,$4,'EXECUTING',$5,$6,$7,$8)`,
+          exact_intent_hash, binding_hash, invoked_by_type, invoked_by_id)
+       VALUES ($1,$2,$3,$4,'EXECUTING',$5,$6,$7,$8,$9,$10)`,
       [
         claimId,
         input.organizationId,
@@ -641,6 +660,8 @@ async function claimExecution(
         input.idempotencyKey,
         input.exactIntentHash,
         input.bindingHash,
+        input.invokedBy.type,
+        input.invokedBy.id,
       ],
     );
     await client.query('RELEASE SAVEPOINT execution_claim');
@@ -805,6 +826,7 @@ async function settle(
     operation: CanonicalOperation;
     executedIntentHash: string;
     outcome: ProviderOutcome;
+    invokedBy: ExecutionInvoker;
   },
 ): Promise<EnforceExecutionResult> {
   const { outcome } = input;
@@ -862,6 +884,11 @@ async function settle(
       decision_id: input.decision.id,
       authorization_request_id: input.decision.request_id,
       agent_id: input.agentId,
+      // Whose authority was spent, and who spent it. Recorded in the signed
+      // artifact rather than only in the claim row, so a verifier holding the
+      // receipt can name the acting party without being granted the database.
+      invoked_by_type: input.invokedBy.type,
+      invoked_by_id: input.invokedBy.id,
       enforced: true,
       provider: input.provider.name,
       provider_idempotent: input.provider.idempotent,
