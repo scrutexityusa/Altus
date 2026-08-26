@@ -124,6 +124,9 @@ lint: ## Check formatting, types and contract drift
 	pnpm run typecheck
 	pnpm exec tsx scripts/generate-specs.ts --check
 	pnpm exec tsx scripts/generate-canonicalization-vectors.ts --check
+	# The demo and the seed must reach the control plane the way a partner does.
+	# Four defects came from fixtures taking a shortcut the public API lacks.
+	scripts/check-public-path.sh
 
 .PHONY: ci-status
 ci-status: ## Ask GitHub Actions whether this branch is actually green

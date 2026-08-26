@@ -117,6 +117,23 @@ And, for the class the migration defect belongs to:
    to zero and rebuilds it. Removing 0010's backfill fails the seeded test and
    leaves the empty one passing, which is the whole finding in one line.
 
+## Green is an observed state, not an intended one
+
+The rule generalises past CI, and it was broken again inside this repository
+after the mechanisms above were built: a commit message asserted "621 tests
+unchanged" while the local run had actually printed `Tests no tests`, because
+PostgreSQL had lapsed. The number was correct when the suite was re-run. It was
+asserted before it was observed.
+
+So: **no test count, invariant tally or "green" appears in a commit message,
+release note, or anything sent to a partner unless the run that produced it
+happened and was read.** The same applies to timings — see
+`docs/design-partner/cold-room-transcript.md`, where a measured-looking figure
+turned out to describe a run that could not have occurred.
+
+For a product whose entire proposition is claims somebody else can verify, an
+unverified claim in our own commit history is not a small inconsistency.
+
 ## Consequences
 
 - Reporting a state now costs an API call. That is the correct price.

@@ -75,6 +75,21 @@ does less.
   If the agent holds bank credentials directly, Altus is not in the path, and
   there is no egress detection to catch that. Removing side channels is the
   partner's work.
+
+  Worth being exact about what stops a payment today: **our position, not
+  cryptography.** In orchestrated mode Altus sits in the execution path. In
+  attested mode — designed, not built — Altus never holds your funds or bank
+  credentials, and your provider verifies a bounded authorization artifact
+  against a public key you trust. **We can enforce the action without custody of
+  the money** is the position; today only the first half is true.
+  Altus performs the operation and refuses anything that does
+  not match what it authorized, which is enforcement as long as it is the only
+  route to the provider. The direction that removes the qualifier is a signed
+  attestation the provider itself verifies — so that going around us fails at
+  the rail rather than succeeding quietly. Designed in
+  [ADR-0022](../decisions/0022-enforcement-model.md); not built, and it needs a
+  provider willing to check a signature.
+
 - **It does not judge whether a decision was _correct_.** The receipt attests to
   `evidence_integrity_and_provenance` — that this decision was made, under this
   policy, on these facts. Whether the policy was wise is a human question.
@@ -184,7 +199,7 @@ These are the honest gaps as of this release. None is hidden behind a flag.
 ## Verify it yourself
 
 ```
-make ci           # 611 tests, lint, build, demo
+make ci           # 621 tests, lint, build, demo
 make adversarial  # 11 security invariants, mounted as real attacks
 make recovery     # SIGKILL the process mid-payment; assert what survived
 ```

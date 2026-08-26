@@ -42,6 +42,8 @@ hash from that point changes, so any externally held head hash exposes it, and
 `covers_genesis` tells a caller whether the verified segment was anchored.
 
 Closing it properly means publishing periodic head hashes to a witness the API
-process cannot reach. **That is not built.** It is recorded here and in
+process cannot reach. That is designed in
+[ADR-0021](0021-evidence-anchoring.md), together with the offline-verifiable
+bundle it is useless without. **Neither is built.** It is recorded here and in
 `docs/security-model.md` as a known gap rather than left as an implied
 guarantee.

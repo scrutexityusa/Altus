@@ -66,40 +66,67 @@ While running, in their own words:
 - **Anything they had to find outside the guide** — a file, the README, a
   source file, a search engine.
 
-Afterwards, five questions, before any discussion:
+Afterwards, six questions, before any discussion:
 
 1. In one sentence, what does this system do?
-2. Who or what is stopped by it, and from doing what?
-3. Why does activating a policy need three people? Does that seem right to you?
-4. What would you have to change to point this at your own bank accounts?
-5. What did you not trust?
+2. **What exactly prevented that execution from exceeding its authority?**
+3. **Why did the policy need two reviewers who did not write it?**
+4. Who or what is stopped by it, and from doing what?
+5. What would you have to change to point this at your own bank accounts?
+6. What did you not trust?
 
-Question 1 is the important one. If the answer is "it logs what agents do" or
-"it's an approval workflow", the positioning has failed regardless of how
-smoothly the commands ran.
+Questions 1, 2 and 3 are the ones that can fail. A stranger who runs all eleven
+steps cleanly and cannot answer them has produced an **onboarding success and a
+comprehension failure**, which is the more expensive result and the easier one
+to miss — the commands worked, so the run looks like a pass.
+
+Answers to watch for on question 1: "it logs what agents do" or "it's an
+approval workflow" means the positioning has failed regardless of how smoothly
+it ran. On question 2, "the policy said no" is not the answer — the execution
+in step 9 was _allowed_; what bounded it was a lease, a ceiling, and a hash
+comparison at the boundary. If none of that surfaced, the guide showed them a
+sequence rather than a mechanism.
 
 ## How to read the result
 
-| Finding                                 | What it means                                  | Who fixes it                    |
-| --------------------------------------- | ---------------------------------------------- | ------------------------------- |
-| A command fails                         | A defect in the guide or the product           | us, immediately                 |
-| They guessed and were right             | The guide is under-specified                   | us                              |
-| They guessed and were wrong             | The guide is misleading — worse                | us, immediately                 |
-| They looked something up                | A missing sentence, at the point they looked   | us                              |
-| They finished and cannot answer Q1      | A positioning failure, not a documentation one | us, and it is the expensive one |
-| They disagree with the three-human rule | A conversation, not a defect                   | nobody — record it              |
+Classify by **what kind of thing broke**, because the response differs and
+conflating them is how a stranger test turns into a redesign:
 
-The last row matters. The three-human requirement, the role-versus-ceiling
-distinction, the bootstrap ceremony, two non-author approvals, and the
-counterparty registration rule are **deliberate** and have survived a cold read
-already. If a stranger dislikes them, that is signal about how to explain them,
-not permission to weaken them.
+| They say                                     | Classification                  | Response                                        |
+| -------------------------------------------- | ------------------------------- | ----------------------------------------------- |
+| "This command can't connect"                 | environment / tooling           | Fix defaults or setup                           |
+| "What is `scrutexity_owner`?"                | comprehension of a mechanism    | One sentence, where they looked                 |
+| "Why do I need three people?"                | product-model comprehension     | Explain the model; do not change it             |
+| "Why did the payment get denied?"            | workflow / UX                   | Improve the error or the flow                   |
+| "I don't understand what Altus actually did" | positioning                     | Fix the product explanation — the expensive one |
+| They guessed and were right                  | the guide is under-specified    | Say the thing they guessed                      |
+| They guessed and were wrong                  | the guide is misleading — worse | Fix immediately                                 |
+| They disagree with the three-human rule      | a conversation, not a defect    | Record it; change nothing                       |
+
+**Fix exactly the obstacle they hit.** Not "improve onboarding generally". The
+temptation after a stranger struggles is to rewrite the whole guide, and the
+result is a document tuned to one person's confusion with the specific defect
+still somewhere inside it.
+
+The last row is the one people get wrong. The three-human requirement, the
+role-versus-ceiling distinction, the bootstrap ceremony, two non-author
+approvals, and the counterparty registration rule are **deliberate** and have
+survived a cold read already. If a stranger dislikes them, that is signal about
+how to explain them, not permission to weaken them.
+
+Record the timing they produce. It will be the first onboarding number anyone
+can quote: every previous one was measured by somebody who already knew the
+system, and one of those turned out to describe a run that could not have
+happened.
 
 ## Definition of done
 
 A stranger, unaided, on a machine we have never touched, reaches step 11 —
 `INTACT`, a complete causal trace, ceremony credential revoked — and can answer
-question 1 in a sentence that names authority.
+questions 1, 2 and 3: what the system does, in a sentence that names authority;
+what bounded the execution; and why the policy needed two reviewers who did not
+write it. Reaching step 11 without those three is half a pass, and the half that
+was already verified in CI.
 
 Until that has happened, the honest statement is: _the guide's commands are
 verified in CI on every push; the guide's prose has been read cold twice by

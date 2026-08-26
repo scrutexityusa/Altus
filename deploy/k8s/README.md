@@ -45,3 +45,8 @@ Placement changes latency and blast radius, never the answer.
 - **Signing key rotation.** Publish the new public key to verifiers _before_
   switching `RECEIPT_SIGNING_KEY_ID`. Receipts record the key id they were
   signed with, so historical receipts stay verifiable against the old key.
+
+`secretproviderclass.example.yaml` is the production key custody posture:
+the signing key projected into a tmpfs by a secrets agent, with no cloud SDK
+and no credential held by Altus. `secret.example.yaml` is the development
+shape and is refused in production. See `docs/key-management.md`.

@@ -100,7 +100,16 @@ const ConfigSchema = z.object({
    *
    * See services/api/src/keys/provider.ts.
    */
-  SECRET_PROVIDER: z.enum(['env', 'file', 'kms']).default('env'),
+  SECRET_PROVIDER: z.enum(['env', 'file', 'agent', 'kms']).default('env'),
+  /**
+   * Lets `agent` custody accept a persistent mount.
+   *
+   * Exists for development on a platform without tmpfs, and is refused in
+   * production below. Without it the custody check runs identically everywhere,
+   * which is the point: a check that only runs in production is a check nobody
+   * has seen pass.
+   */
+  SECRET_AGENT_ALLOW_PERSISTENT: z.coerce.boolean().default(false),
   /** Directory the `file` provider reads from. */
   SECRET_DIR: z.string().default('./.secrets'),
 });
@@ -149,13 +158,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'a shared signal secret is a forgery capability held in the database',
     );
   }
-  if (config.NODE_ENV === 'production' && config.SECRET_PROVIDER !== 'kms') {
+  if (config.NODE_ENV === 'production' && config.SECRET_AGENT_ALLOW_PERSISTENT) {
+    throw new Error(
+      'SECRET_AGENT_ALLOW_PERSISTENT must not be set in production; it defeats the ' +
+        'only check that distinguishes an agent-delivered key from a file on a disk',
+    );
+  }
+
+  if (
+    config.NODE_ENV === 'production' &&
+    config.SECRET_PROVIDER !== 'kms' &&
+    config.SECRET_PROVIDER !== 'agent'
+  ) {
     // Local key custody in production means the private key lives wherever the
     // process does: in an environment variable a crash dump captures, or a
     // file on a disk that gets snapshotted. Refuse at boot rather than
     // discover it during an incident.
     throw new Error(
-      `SECRET_PROVIDER must be "kms" in production; "${config.SECRET_PROVIDER}" is local custody`,
+      `SECRET_PROVIDER must be "kms" or "agent" in production; ` +
+        `"${config.SECRET_PROVIDER}" is local custody`,
     );
   }
   return { ...config, isProduction: config.NODE_ENV === 'production' };
