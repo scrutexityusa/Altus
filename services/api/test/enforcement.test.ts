@@ -1012,9 +1012,9 @@ describe('the evidence names who invoked the boundary', () => {
     expect(result.status).toBe(201);
 
     const row = await claimRow(decision.decision_id);
-    expect(row.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(row.agent_id).toBe(h.tenant.agents['treasury']);
     expect(row.invoked_by_type).toBe('agent');
-    expect(row.invoked_by_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(row.invoked_by_id).toBe(h.tenant.agents['treasury']);
   });
 
   it('distinguishes the operator who executed from the agent whose authority was spent', async () => {
@@ -1028,7 +1028,7 @@ describe('the evidence names who invoked the boundary', () => {
     expect(result.status, JSON.stringify(result.body)).toBe(201);
 
     const row = await claimRow(decision.decision_id);
-    expect(row.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(row.agent_id).toBe(h.tenant.agents['treasury']);
     expect(row.invoked_by_type).toBe('user');
     expect(row.invoked_by_id).toBe(h.tenant.users['admin']);
     // The whole point: the two are different, and both survived.
@@ -1051,7 +1051,7 @@ describe('the evidence names who invoked the boundary', () => {
       h.tenant.tokens['admin']!,
     );
     const payload = receipt.body.receipt.payload;
-    expect(payload.agent_id).toBe(h.tenant.agents['treasury_agent']);
+    expect(payload.agent_id).toBe(h.tenant.agents['treasury']);
     expect(payload.invoked_by_type).toBe('user');
     expect(payload.invoked_by_id).toBe(h.tenant.users['admin']);
   });
